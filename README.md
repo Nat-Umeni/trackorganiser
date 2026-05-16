@@ -1,0 +1,1 @@
+Potentially doing dj stuff, will use this to rip playlists from my spotify acc
