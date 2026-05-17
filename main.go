@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"github.com/Nat-Umeni/trackorganiser/spotify"
+	"github.com/Nat-Umeni/trackorganiser/downloader"
 	"github.com/joho/godotenv"
 )
 
@@ -21,5 +22,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	fmt.Println("Succesfully init'd spotify client")
+    dl := downloader.NewAudioDownloader("./downloads")
+    if err := dl.DownloadBestAudio("Daft Punk - Something About Us"); err != nil {
+        fmt.Println("Download error: %w", err)
+		os.Exit(1)
+		return
+    }
 }
