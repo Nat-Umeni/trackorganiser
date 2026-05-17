@@ -10,26 +10,25 @@ type AudioDownloader struct {
     OutputDir string
 }
 
-func NewAudioDownloader(outputDir string) *AudioDownloader {
-    // Create output directory if it doesn't exist
-    if err := os.MkdirAll(outputDir, 0755); err != nil {
-        // Maybe return an error instead, but New... usually doesn't fail.
-        // For simplicity, we'll create lazily in DownloadBestAudio.
-    }
-    return &AudioDownloader{OutputDir: outputDir}
-}
-
-func (d *AudioDownloader) DownloadBestAudio(query string) error {
+func NewAudioDownloader(outputDir string) (*AudioDownloader, error) {
     // Check yt-dlp presence
     if _, err := exec.LookPath("yt-dlp"); err != nil {
-        return fmt.Errorf("yt-dlp not found. Please install it: https://github.com/yt-dlp/yt-dlp#installation")
+        return nil, fmt.Errorf("yt-dlp not found. Please install it: https://github.com/yt-dlp/yt-dlp#installation")
+    }
+
+    if _, err := exec.LookPath("ffmpeg"); err != nil {
+        return nil,fmt.Errorf("ffmpeg not found. Please install it: https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip")
     }
 
 	// Ensure output directory exists
-    if err := os.MkdirAll(d.OutputDir, 0755); err != nil {
-        return fmt.Errorf("create output dir: %w", err)
+    if err := os.MkdirAll(outputDir, 0755); err != nil {
+        return nil,fmt.Errorf("create output dir: %w", err)
     }
 
+    return &AudioDownloader{OutputDir: outputDir}, nil
+}
+
+func (d *AudioDownloader) DownloadBestAudio(query string) error {
     cmd := exec.Command(
         "yt-dlp",
         "-x", "--audio-format", "mp3", "--audio-quality", "192",

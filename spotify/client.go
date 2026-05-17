@@ -97,8 +97,7 @@ func (c *Client) callSpotify(method string, endpoint string, body interface{}) (
 
 		requestBody = bytes.NewBuffer(jsonData)
 	}
-
-	// Should this not be c.httpClient.NewRequest?
+	
 	request, err := http.NewRequest(method, fullURL, requestBody)
 	if err != nil {
 		return nil, fmt.Errorf("create request %w", err)
