@@ -38,30 +38,35 @@ type playlistsResponse struct {
 }
 
 func (c *Client) FetchPlaylists() ([]Playlist, error) {
-	if err := c.ensureToken(); err != nil {
-		return nil, fmt.Errorf("auth: %w", err)
+	var all []Playlist
+
+	nextUrl := "/me/playlists?limit=50"
+	for nextUrl != "" {
+		resp, err := c.callSpotify("GET", nextUrl, nil)
+		if err != nil {
+			return nil, fmt.Errorf("request: %w", err)
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			return nil, fmt.Errorf("Spotify API error %d: %s", resp.StatusCode, string(body))
+		}
+
+		var playlistsResponse playlistsResponse
+		err = json.NewDecoder(resp.Body).Decode(&playlistsResponse)
+		resp.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("decode %w", err)
+		}
+
+		all = append(all, playlistsResponse.Items...)
+		nextUrl = playlistsResponse.Next
 	}
 
-	resp, err := c.callSpotify("GET", "/me/playlists", nil)
-	if err != nil {
-		return nil, fmt.Errorf("request: %w", err)
-	}
-
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("Spotify API error %d: %s", resp.StatusCode, string(body))
-	}
-
-	var playlistsResponse playlistsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&playlistsResponse); err != nil {
-		return nil, fmt.Errorf("decode %w", err)
-	}
-
-	sort.Slice(playlistsResponse.Items, func(i, j int) bool {
-		return playlistsResponse.Items[i].Name < playlistsResponse.Items[j].Name
+	sort.Slice(all, func(i, j int) bool {
+		return all[i].Name < all[j].Name
 	})
 
-	return playlistsResponse.Items, nil
+	return all, nil
 }
