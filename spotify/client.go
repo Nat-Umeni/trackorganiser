@@ -169,7 +169,13 @@ func (c *Client) callSpotify(method string, endpoint string, body interface{}) (
 		return nil, fmt.Errorf("ensure token: %w", err)
 	}
 
-	fullURL := "https://api.spotify.com/v1/" + strings.TrimLeft(endpoint, "/")
+	// Paging links from Spotify are already full URLs; short endpoints like
+	// "/me/playlists" need the base prefixed.
+	fullURL := endpoint
+	if !strings.HasPrefix(fullURL, "https://") {
+		fullURL = "https://api.spotify.com/v1/" + strings.TrimLeft(endpoint, "/")
+	}
+
 	if body != nil {
 		jsonData, err := json.Marshal(body)
 		if err != nil {
