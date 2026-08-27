@@ -63,7 +63,7 @@ func initiateSpotifyAuth(clientID string) (code, codeVerifier, state string, err
 	if err != nil {
 		return "", "", "", fmt.Errorf("parse auth URL: %w", err)
 	}
-	
+
 	query := authURL.Query()
 	query.Set("client_id", clientID)
 	query.Set("response_type", "code")

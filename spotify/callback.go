@@ -44,38 +44,38 @@ func startCallbackServer(address string) (chan string, func(), error) {
 
 // exchangeCodeForTokens swaps the authorization code + verifier for an access and refresh token.
 func exchangeCodeForTokens(clientID, code, verifier string) (accessToken, refreshToken string, err error) {
-    data := url.Values{}
-    data.Set("client_id", clientID)
-    data.Set("grant_type", "authorization_code")
-    data.Set("code", code)
-    data.Set("redirect_uri", "http://127.0.0.1:8080/callback")
-    data.Set("code_verifier", verifier)
+	data := url.Values{}
+	data.Set("client_id", clientID)
+	data.Set("grant_type", "authorization_code")
+	data.Set("code", code)
+	data.Set("redirect_uri", "http://127.0.0.1:8080/callback")
+	data.Set("code_verifier", verifier)
 
-    resp, err := http.PostForm("https://accounts.spotify.com/api/token", data)
-    if err != nil {
-        return "", "", fmt.Errorf("token exchange request: %w", err)
-    }
-    defer resp.Body.Close()
+	resp, err := http.PostForm("https://accounts.spotify.com/api/token", data)
+	if err != nil {
+		return "", "", fmt.Errorf("token exchange request: %w", err)
+	}
+	defer resp.Body.Close()
 
-    body, err := io.ReadAll(resp.Body)
-    if err != nil {
-        return "", "", fmt.Errorf("read token response: %w", err)
-    }
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", "", fmt.Errorf("read token response: %w", err)
+	}
 
-    if resp.StatusCode != http.StatusOK {
-        return "", "", fmt.Errorf("token endpoint error %d: %s", resp.StatusCode, string(body))
-    }
+	if resp.StatusCode != http.StatusOK {
+		return "", "", fmt.Errorf("token endpoint error %d: %s", resp.StatusCode, string(body))
+	}
 
-    var result struct {
-        AccessToken  string `json:"access_token"`
-        RefreshToken string `json:"refresh_token"`
-        ExpiresIn    int    `json:"expires_in"`
-    }
-    if err := json.Unmarshal(body, &result); err != nil {
-        return "", "", fmt.Errorf("parse token JSON: %w", err)
-    }
+	var result struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		ExpiresIn    int    `json:"expires_in"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", "", fmt.Errorf("parse token JSON: %w", err)
+	}
 
 	// fmt.Println("DEBUG exchange: refresh_token =", result.RefreshToken[:15]+"...")
 
-    return result.AccessToken, result.RefreshToken, nil
+	return result.AccessToken, result.RefreshToken, nil
 }
