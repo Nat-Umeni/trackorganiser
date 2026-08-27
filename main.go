@@ -2,9 +2,12 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -15,6 +18,11 @@ import (
 // stdin is created once and reused. A bufio.Scanner buffers ahead, so making a
 // new one per prompt can swallow input that has already been read.
 var stdin = bufio.NewScanner(os.Stdin)
+
+// ErrDownloadDirDeclined means the user chose not to create the download
+// directory. It is a normal outcome rather than a failure, so callers should
+// match it with errors.Is and exit quietly.
+var ErrDownloadDirDeclined = errors.New("no download directory to save to")
 
 func init() {
 	if err := godotenv.Load(); err != nil {
@@ -35,6 +43,7 @@ func main() {
 	// 	return
 	// }
 
+	// Set up Spotify and collect playlists
 	client, err := spotify.NewClient(clientID)
 	if err != nil {
 		log.Fatal("Failed to create Spotify client:", err)
@@ -63,13 +72,30 @@ func main() {
 		log.Fatal("No playlists selected")
 	}
 
+	// Confirm correct playlist choices
 	fmt.Println("You chose:")
-	
 	var playlistsToGet []spotify.Playlist
 	for _, selectedPlaylistIndex := range selectedPlaylists {
 		playlistsToGet = append(playlistsToGet, playlists[selectedPlaylistIndex])
 		fmt.Println(playlists[selectedPlaylistIndex].Name)
 	}
+
+	// Grab the download path and verify it's reachable
+	downloadPathInput, downloadPathInputErr := readLine("What location would you like to save the downloads to? Default is ~/Downloads.")
+	if downloadPathInputErr != nil {
+		log.Fatal("Failed to gather input on prefered download path: ", downloadPathInputErr)
+	}
+
+	downloadPath, err := ensureOutputLocationExists(downloadPathInput)
+	switch {
+	case errors.Is(err, ErrDownloadDirDeclined):
+		fmt.Println("Nothing saved.")
+		return
+	case err != nil:
+		log.Fatal(err)
+	}
+
+	fmt.Printf("\nYou chose to output to: %s\n", downloadPath)
 }
 
 func readLine(prompt string) (string, error) {
@@ -139,4 +165,51 @@ func parseIndex(text string, max int) (int, error) {
 		return 0, fmt.Errorf("number %d out of range (1–%d)", num, max)
 	}
 	return num - 1, nil
+}
+
+func ensureOutputLocationExists(downloadPath string) (string, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("finding your home directory: %w", err)
+	}
+
+	if downloadPath == "" {
+		downloadPath = filepath.Join(homeDir, "Downloads")
+	}
+
+	// The shell expands a leading tilde, but a path typed at our own prompt
+	// arrives with the tilde intact, and filepath.Abs would treat it as an
+	// ordinary directory name. "~user" is left alone because Go cannot look up
+	// another user's home directory portably.
+	if downloadPath == "~" || strings.HasPrefix(downloadPath, "~/") {
+		downloadPath = filepath.Join(homeDir, downloadPath[1:])
+	}
+
+	safeDownloadPath, err := filepath.Abs(downloadPath)
+	if err != nil {
+		return "", fmt.Errorf("resolving %q to an absolute path: %w", downloadPath, err)
+	}
+
+	// Stat failing does not only mean "missing" - permission problems and dead
+	// mounts land here too, and creating a directory would not fix those.
+	info, err := os.Stat(safeDownloadPath)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		answer, answerErr := readLine(fmt.Sprintf("%s doesn't exist. Create it? [y/N] ", safeDownloadPath))
+		if answerErr != nil {
+			return "", fmt.Errorf("reading your answer: %w", answerErr)
+		}
+		if !strings.EqualFold(answer, "y") && !strings.EqualFold(answer, "yes") {
+			return "", ErrDownloadDirDeclined
+		}
+		if err := os.MkdirAll(safeDownloadPath, 0755); err != nil {
+			return "", fmt.Errorf("creating %s: %w", safeDownloadPath, err)
+		}
+	case err != nil:
+		return "", fmt.Errorf("checking the download path: %w", err)
+	case !info.IsDir():
+		return "", fmt.Errorf("the download path is not a directory: %s", safeDownloadPath)
+	}
+
+	return safeDownloadPath, nil
 }
