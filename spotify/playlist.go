@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 )
 
 // Playlist is a single playlist in the user's library.
@@ -57,6 +58,10 @@ func (c *Client) FetchPlaylists() ([]Playlist, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&playlistsResponse); err != nil {
 		return nil, fmt.Errorf("decode %w", err)
 	}
+
+	sort.Slice(playlistsResponse.Items, func(i, j int) bool {
+		return playlistsResponse.Items[i].Name < playlistsResponse.Items[j].Name
+	})
 
 	return playlistsResponse.Items, nil
 }

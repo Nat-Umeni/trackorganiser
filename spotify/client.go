@@ -48,10 +48,10 @@ func NewClient(clientID string) (*Client, error) {
 		// fmt.Println("Loaded token:", c.savedRefreshToken[:10]+"...")
 		// Verify the token is still valid by attempting to refresh
 		if refreshErr := c.refreshToken(); refreshErr == nil {
-			fmt.Println("Token valid, no browser needed.")
+			// fmt.Println("Token valid, no browser needed.")
 			return c, nil // <-- success, we're done
 		} else {
-			fmt.Println("Stored token invalid:", refreshErr)
+			// fmt.Println("Stored token invalid:", refreshErr)
 			// Token revoked or invalid – delete it and continue to full auth
 			c.deleteTokenCache()
 			c.savedRefreshToken = ""
