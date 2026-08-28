@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -97,9 +98,40 @@ func main() {
 	}
 
 	fmt.Printf("\nYou chose to output to: %s\n\nPulling in tracks from your chosen playlists\n", downloadPath)
-	
-	
-	
+
+	tracksByPlaylist := make(map[string][]spotify.Track)
+	for _, currentPlaylist := range playlistsToGet {
+		tracks, err := client.FetchPlaylistTracks(currentPlaylist)
+		if err != nil {
+			fmt.Printf("Skipped %s: %v\n", currentPlaylist.Name, err)
+			continue
+		}
+
+		tracksByPlaylist[currentPlaylist.Name] = tracks
+		fmt.Printf("%s: %d of %d\n", currentPlaylist.Name, len(tracks), currentPlaylist.Items.Total)
+	}
+
+	/*
+		 * "Soul Food":
+			* [{
+			      "id": "3S82boVtMl70fYMmWxVe0A",
+			      "name": "The Process",
+			      "artists": [
+			        {
+			          "id": "7MkdDRirzB2d9UZh6ZMb8p",
+			          "name": "DeeRiginal",
+			          "href": "https://api.spotify.com/v1/artists/7MkdDRirzB2d9UZh6ZMb8p"
+			        },
+			        {
+			          "id": "6AxpNvP90GRajaB0TOYY9H",
+			          "name": "Vagrant Real Estate",
+			          "href": "https://api.spotify.com/v1/artists/6AxpNvP90GRajaB0TOYY9H"
+			        }
+			      ],
+			      "duration_ms": 52450
+			}]
+	*/
+
 }
 
 func readLine(prompt string) (string, error) {
@@ -216,4 +248,10 @@ func ensureOutputLocationExists(downloadPath string) (string, error) {
 	}
 
 	return safeDownloadPath, nil
+}
+
+func dd(v any) {
+	out, _ := json.MarshalIndent(v, "", "  ")
+	fmt.Println(string(out))
+	os.Exit(1)
 }

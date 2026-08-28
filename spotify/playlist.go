@@ -79,9 +79,10 @@ type Artist struct {
 }
 
 type Track struct {
-	ID      string   `json:"id"`
-	Name    string   `json:"name"`
-	Artists []Artist `json:"artists"`
+	ID         string   `json:"id"`
+	Name       string   `json:"name"`
+	Artists    []Artist `json:"artists"`
+	DurationMS int      `json:"duration_ms"`
 }
 
 type PlaylistTrackItem struct {
@@ -120,8 +121,8 @@ func (c *Client) FetchPlaylistTracks(playlist Playlist) ([]Track, error) {
 		}
 
 		for _, playlistTrackItem := range playlistTracksResponse.Items {
-			if playlistTrackItem.IsLocal || playlistTrackItem.Item.Name == "" { 
-				continue 
+			if playlistTrackItem.IsLocal || playlistTrackItem.Item.Name == "" {
+				continue
 			}
 			allTracks = append(allTracks, playlistTrackItem.Item)
 		}
