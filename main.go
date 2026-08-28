@@ -11,7 +11,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"unicode"
 
+	"github.com/Nat-Umeni/trackorganiser/downloader"
 	"github.com/Nat-Umeni/trackorganiser/spotify"
 	"github.com/joho/godotenv"
 )
@@ -36,13 +38,6 @@ func main() {
 	if clientID == "" {
 		log.Fatal("SPOTIFY_CLIENT_ID not set")
 	}
-
-	// dl, err := downloader.NewAudioDownloader("./downloads")
-	// if err := dl.DownloadBestAudio("Bodies Drowning Pool"); err != nil {
-	//     fmt.Println("Download error: %w", err)
-	// 	os.Exit(1)
-	// 	return
-	// }
 
 	// Set up Spotify and collect playlists
 	client, err := spotify.NewClient(clientID)
@@ -132,6 +127,48 @@ func main() {
 			}]
 	*/
 
+	for _, tracksToDownload := range tracksByPlaylist {
+		cleanPlaylistName := sanitizePlaylistName(playlistToDownload)
+
+		playlistPath := filepath.Join(downloadPath, cleanPlaylistName)
+
+		// dl, downloaderErr := downloader.NewAudioDownloader(playlistPath)
+		// if downloaderErr != nil {
+		// 	log.Fatal("Failed to set up downloader on that path: ", downloaderErr)
+		// }
+
+		for index, track := range tracksToDownload {
+			fmt.Sprintf("\nWould have downloaded track: %d - %s by %s\n\n", index, track.Name, track.Artists[0])
+		}
+		
+	}
+
+}
+
+func sanitizePlaylistName(playlist spotify.Playlist) string {
+	name := strings.TrimSpace(playlist.Name)
+
+	cleanName := strings.Map(func(r rune) rune {
+		if strings.ContainsRune(`"<>:/\|?*`, r) || unicode.IsControl(r) {
+			return '-'
+		}
+
+		return r
+	}, name)
+
+	cleanName = strings.TrimSpace(cleanName)
+	cleanName = strings.TrimRight(cleanName, " .")
+
+	if cleanName == "" {
+		id := playlist.ID
+		if len(id) > 5 {
+			id = id[len(id)-5:]
+		}
+
+		return "playlist-" + id
+	}
+
+	return cleanName
 }
 
 func readLine(prompt string) (string, error) {
