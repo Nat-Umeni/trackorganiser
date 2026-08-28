@@ -57,7 +57,7 @@ func main() {
 	for index, playlist := range playlists {
 		fmt.Printf("%d - %s\n", index+1, playlist.Name)
 	}
-	userInput, playlistInputErr := readLine("\nType the numbers of the playlists you would like to save to disk, separated by commas OR by dashes. \n IE: 1,3,5 OR 4-7 \n")
+	userInput, playlistInputErr := readLine("\nType the numbers of the playlists you would like to save to disk, separated by commas OR by dashes. IE: 1,3,5 OR 4-7 \n\n")
 
 	if playlistInputErr != nil {
 		log.Fatal("Failed to read input from user: ", playlistInputErr)
@@ -72,16 +72,17 @@ func main() {
 		log.Fatal("No playlists selected")
 	}
 
+	fmt.Println("You chose: ")
+
 	// Confirm correct playlist choices
-	fmt.Println("You chose:")
 	var playlistsToGet []spotify.Playlist
 	for _, selectedPlaylistIndex := range selectedPlaylists {
 		playlistsToGet = append(playlistsToGet, playlists[selectedPlaylistIndex])
-		fmt.Println(playlists[selectedPlaylistIndex].Name)
+		fmt.Printf("\n%v", playlists[selectedPlaylistIndex].Name)
 	}
 
 	// Grab the download path and verify it's reachable
-	downloadPathInput, downloadPathInputErr := readLine("What location would you like to save the downloads to? Default is ~/Downloads.")
+	downloadPathInput, downloadPathInputErr := readLine("\n\nWhat location would you like to save the downloads to? Default is ~/Downloads. \n")
 	if downloadPathInputErr != nil {
 		log.Fatal("Failed to gather input on prefered download path: ", downloadPathInputErr)
 	}
@@ -95,7 +96,10 @@ func main() {
 		log.Fatal(err)
 	}
 
-	fmt.Printf("\nYou chose to output to: %s\n", downloadPath)
+	fmt.Printf("\nYou chose to output to: %s\n\nPulling in tracks from your chosen playlists\n", downloadPath)
+	
+	
+	
 }
 
 func readLine(prompt string) (string, error) {
