@@ -102,43 +102,22 @@ func main() {
 			continue
 		}
 
-		tracksByPlaylist[currentPlaylist.Name] = tracks
-		fmt.Printf("%s: %d of %d\n", currentPlaylist.Name, len(tracks), currentPlaylist.Items.Total)
+		cleanPlaylistName := sanitizePlaylistName(currentPlaylist)
+		tracksByPlaylist[cleanPlaylistName] = tracks
+		fmt.Printf("%s: %d of %d\n", cleanPlaylistName, len(tracks), currentPlaylist.Items.Total)
 	}
 
-	/*
-		 * "Soul Food":
-			* [{
-			      "id": "3S82boVtMl70fYMmWxVe0A",
-			      "name": "The Process",
-			      "artists": [
-			        {
-			          "id": "7MkdDRirzB2d9UZh6ZMb8p",
-			          "name": "DeeRiginal",
-			          "href": "https://api.spotify.com/v1/artists/7MkdDRirzB2d9UZh6ZMb8p"
-			        },
-			        {
-			          "id": "6AxpNvP90GRajaB0TOYY9H",
-			          "name": "Vagrant Real Estate",
-			          "href": "https://api.spotify.com/v1/artists/6AxpNvP90GRajaB0TOYY9H"
-			        }
-			      ],
-			      "duration_ms": 52450
-			}]
-	*/
+	for playlistName, tracksToDownload := range tracksByPlaylist {
+		
+		playlistPath := filepath.Join(downloadPath, playlistName)
 
-	for _, tracksToDownload := range tracksByPlaylist {
-		cleanPlaylistName := sanitizePlaylistName(playlistToDownload)
-
-		playlistPath := filepath.Join(downloadPath, cleanPlaylistName)
-
-		// dl, downloaderErr := downloader.NewAudioDownloader(playlistPath)
-		// if downloaderErr != nil {
-		// 	log.Fatal("Failed to set up downloader on that path: ", downloaderErr)
-		// }
+		dl, downloaderErr := downloader.NewAudioDownloader(playlistPath)
+		if downloaderErr != nil {
+			log.Fatal("Failed to set up downloader on that path: ", downloaderErr)
+		}
 
 		for index, track := range tracksToDownload {
-			fmt.Sprintf("\nWould have downloaded track: %d - %s by %s\n\n", index, track.Name, track.Artists[0])
+			fmt.Printf("\nWould have downloaded track: %d - %s by %s\n\n", index, track.Name, track.Artists[0].Name)
 		}
 		
 	}
