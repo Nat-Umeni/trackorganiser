@@ -4,10 +4,19 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+
+	"github.com/bogem/id3v2/v2"
 )
 
 type AudioDownloader struct {
 	OutputDir string
+}
+
+type Tags struct {
+	Title  string
+	Artist string
+	Album  string
 }
 
 func NewAudioDownloader(outputDir string) (*AudioDownloader, error) {
@@ -28,13 +37,17 @@ func NewAudioDownloader(outputDir string) (*AudioDownloader, error) {
 	return &AudioDownloader{OutputDir: outputDir}, nil
 }
 
-func (d *AudioDownloader) DownloadBestAudio(query string) error {
+func (d *AudioDownloader) DownloadBestAudio(query string, filename string, tags Tags) error {
+	filepathForDownloader := filepath.Join(d.OutputDir, filename)
+
 	cmd := exec.Command(
 		"yt-dlp",
-		"-x", "--audio-format", "wav", "--audio-quality", "192",
 		"-f", "bestaudio",
+		"-x",
+		"--audio-format", "mp3",
+		"--audio-quality", "320k",
+		"--output", filepathForDownloader+".%(ext)s",
 		"--no-overwrites",
-		"--output", d.OutputDir+"/%(title)s.%(ext)s",
 		"ytsearch:"+query,
 	)
 
@@ -42,5 +55,24 @@ func (d *AudioDownloader) DownloadBestAudio(query string) error {
 	if err != nil {
 		return fmt.Errorf("yt-dlp failed: %v\nOutput: %s", err, string(output))
 	}
+
+	return addTagsToFile(filepathForDownloader+".mp3", tags)
+}
+
+func addTagsToFile(path string, tags Tags) error {
+	tag, err := id3v2.Open(path, id3v2.Options{Parse: true})
+	if err != nil {
+		return fmt.Errorf("Error while opening mp3 file %q: %w ", tags.Title, err)
+	}
+	defer tag.Close()
+
+	tag.SetAlbum(tags.Album)
+	tag.SetArtist(tags.Artist)
+	tag.SetTitle(tags.Title)
+
+	if err = tag.Save(); err != nil {
+		return fmt.Errorf("tagging %q: %w", tags.Title, err)
+	}
+
 	return nil
 }

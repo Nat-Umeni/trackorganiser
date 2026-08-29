@@ -26,6 +26,8 @@ var stdin = bufio.NewScanner(os.Stdin)
 // match it with errors.Is and exit quietly.
 var ErrDownloadDirDeclined = errors.New("no download directory to save to")
 
+const dryRun = true
+
 func init() {
 	if err := godotenv.Load(); err != nil {
 		fmt.Println("No .env file, continuing")
@@ -115,11 +117,29 @@ func main() {
 		}
 
 		for index, track := range tracksToDownload {
-			fmt.Printf("\nWould have downloaded track: %d - %s by %s\n\n", index, track.Name, track.Artists[0].Name)
+			if dryRun {
+				fmt.Printf("\nWould have downloaded track: %d - %s as %s\n\n", index, track.Name, track.FileName())
+				continue
+			}
+
+			fmt.Printf("\nDownloading track: %d - %s by %s\n\n", index, track.Name, track.JoinArtistNames())
+
+			err := dl.DownloadBestAudio(track.BuildSearchQuery(), track.FileName(), buildTrackTags(track))
+			if err != nil {
+				fmt.Printf("Failed: %s — %v\n", track.FileName(), err)
+				continue
+			}
+
 		}
-
 	}
+}
 
+func buildTrackTags(track spotify.Track) downloader.Tags {
+	return downloader.Tags{
+		Artist: track.JoinArtistNames(),
+		Title:  track.Name,
+		Album:  track.Album.Name,
+	}
 }
 
 func readLine(prompt string) (string, error) {
