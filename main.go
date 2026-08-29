@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"unicode"
 
 	"github.com/Nat-Umeni/trackorganiser/downloader"
 	"github.com/Nat-Umeni/trackorganiser/spotify"
@@ -102,7 +101,7 @@ func main() {
 			continue
 		}
 
-		cleanPlaylistName := sanitizePlaylistName(currentPlaylist)
+		cleanPlaylistName := currentPlaylist.FolderName()
 		tracksByPlaylist[cleanPlaylistName] = tracks
 		fmt.Printf("%s: %d of %d\n", cleanPlaylistName, len(tracks), currentPlaylist.Items.Total)
 	}
@@ -121,32 +120,6 @@ func main() {
 
 	}
 
-}
-
-func sanitizePlaylistName(playlist spotify.Playlist) string {
-	name := strings.TrimSpace(playlist.Name)
-
-	cleanName := strings.Map(func(r rune) rune {
-		if strings.ContainsRune(`"<>:/\|?*`, r) || unicode.IsControl(r) {
-			return '-'
-		}
-
-		return r
-	}, name)
-
-	cleanName = strings.TrimSpace(cleanName)
-	cleanName = strings.TrimRight(cleanName, " .")
-
-	if cleanName == "" {
-		id := playlist.ID
-		if len(id) > 5 {
-			id = id[len(id)-5:]
-		}
-
-		return "playlist-" + id
-	}
-
-	return cleanName
 }
 
 func readLine(prompt string) (string, error) {

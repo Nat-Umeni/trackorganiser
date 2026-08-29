@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"sort"
-	"strings"
 )
 
 // Playlist is a single playlist in the user's library.
@@ -17,6 +16,21 @@ type Playlist struct {
 	Public        bool          `json:"public"`
 	PlaylistOwner PlaylistOwner `json:"owner"`
 	Items         ItemsInfo     `json:"items"`
+}
+
+func (playlist Playlist) FolderName() string {
+	cleanName := sanitizeName(playlist.Name)
+
+	if cleanName == "" {
+		id := playlist.ID
+		if len(id) > 5 {
+			id = id[len(id)-5:]
+		}
+
+		return "playlist-" + id
+	}
+
+	return cleanName
 }
 
 // Represents the playlist creator.
@@ -71,75 +85,4 @@ func (c *Client) FetchPlaylists() ([]Playlist, error) {
 	})
 
 	return all, nil
-}
-
-type Artist struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-	Href string `json:"href"`
-}
-
-type Track struct {
-	ID         string   `json:"id"`
-	Name       string   `json:"name"`
-	Artists    []Artist `json:"artists"`
-	DurationMS int      `json:"duration_ms"`
-}
-
-func (t Track) JoinArtistNames() string {
-	fullArtistStringSlice := make([]string, 0, len(t.Artists))
-	for _, artist := range t.Artists {
-		fullArtistStringSlice = append(fullArtistStringSlice, strings.TrimSpace(artist.Name))
-	}
-
-	return strings.Join(fullArtistStringSlice, ", ")
-}
-
-type PlaylistTrackItem struct {
-	IsLocal bool  `json:"is_local"`
-	Item    Track `json:"item"`
-}
-
-type playlistTracksResponse struct {
-	Items []PlaylistTrackItem `json:"items"`
-	Total int                 `json:"total"`
-	Limit int                 `json:"limit"`
-	Next  string              `json:"next"`
-}
-
-func (c *Client) FetchPlaylistTracks(playlist Playlist) ([]Track, error) {
-	nextUrl := fmt.Sprintf("/playlists/%s/items?limit=50", playlist.ID)
-	var allTracks []Track
-
-	for nextUrl != "" {
-		resp, err := c.callSpotify("GET", nextUrl, nil)
-		if err != nil {
-			return nil, fmt.Errorf("request: %w", err)
-		}
-
-		if resp.StatusCode != http.StatusOK {
-			body, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			return nil, fmt.Errorf("Spotify API error %d: %s", resp.StatusCode, string(body))
-		}
-
-		var playlistTracksResponse playlistTracksResponse
-		err = json.NewDecoder(resp.Body).Decode(&playlistTracksResponse)
-		resp.Body.Close()
-		if err != nil {
-			return nil, fmt.Errorf("decode %w", err)
-		}
-
-		for _, playlistTrackItem := range playlistTracksResponse.Items {
-			if playlistTrackItem.IsLocal || playlistTrackItem.Item.Name == "" {
-				continue
-			}
-			allTracks = append(allTracks, playlistTrackItem.Item)
-		}
-
-		nextUrl = playlistTracksResponse.Next
-
-	}
-
-	return allTracks, nil
 }
