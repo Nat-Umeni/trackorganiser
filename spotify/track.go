@@ -37,12 +37,17 @@ func (t Track) JoinArtistNames() string {
 	return strings.Join(fullArtistStringSlice, ", ")
 }
 
+// BuildSearchQuery is the string handed to yt-dlp's ytsearch:. It uses only the
+// first artist - extra names narrow YouTube's match rather than widening it - and
+// appends "topic" to bias towards the auto-generated "<Artist> - Topic" channels,
+// which host what the label delivered and so match Spotify's master closely.
+// Music video uploads tend to carry intros that throw the duration out.
 func (t Track) BuildSearchQuery() string {
 	if len(t.Artists) == 0 {
-		return strings.TrimSpace(t.Name)
+		return strings.TrimSpace(t.Name) + " topic"
 	}
 
-	return t.Name + " " + t.Artists[0].Name
+	return strings.TrimSpace(t.Name) + " " + strings.TrimSpace(t.Artists[0].Name) + " topic"
 }
 
 func (t Track) FileName() string {

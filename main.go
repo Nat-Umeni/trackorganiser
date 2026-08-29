@@ -17,7 +17,7 @@ import (
 	"github.com/joho/godotenv"
 )
 
-const dryRun = true
+const dryRun = false
 
 func init() {
 	if err := godotenv.Load(); err != nil {
@@ -131,6 +131,10 @@ func main() {
 		fmt.Printf("%s: %d of %d\n", cleanPlaylistName, len(tracks), currentPlaylist.Items.Total)
 	}
 
+	// Collected across every playlist and printed at the end. An inline warning
+	// is lost among hundreds of tracks; a short list afterwards is actionable.
+	var mismatches []string
+
 	for playlistName, tracksToDownload := range tracksByPlaylist {
 		playlistPath := filepath.Join(downloadPath, playlistName)
 
@@ -147,21 +151,37 @@ func main() {
 
 			fmt.Printf("\nDownloading track: %d - %s by %s\n\n", index, track.Name, track.JoinArtistNames())
 
-			err := dl.DownloadBestAudio(track.BuildSearchQuery(), track.FileName(), buildTrackTags(track))
-			if err != nil {
+			err := dl.DownloadBestAudio(buildRequest(track))
+			switch {
+			case errors.Is(err, downloader.ErrDurationMismatch):
+				// Not a failure - the file downloaded and was tagged. Keep it and
+				// flag it, because an extended mix or a live version is often
+				// worth having.
+				mismatches = append(mismatches, fmt.Sprintf("%s — %v", track.FileName(), err))
+			case err != nil:
 				fmt.Printf("Failed: %s — %v\n", track.FileName(), err)
-				continue
 			}
+		}
+	}
 
+	if len(mismatches) > 0 {
+		fmt.Printf("\n%d track(s) may not be the right version, worth a listen:\n", len(mismatches))
+		for _, mismatch := range mismatches {
+			fmt.Printf("  %s\n", mismatch)
 		}
 	}
 }
 
-func buildTrackTags(track spotify.Track) downloader.Tags {
-	return downloader.Tags{
-		Artist: track.JoinArtistNames(),
-		Title:  track.Name,
-		Album:  track.Album.Name,
+func buildRequest(track spotify.Track) downloader.Request {
+	return downloader.Request{
+		Query:    track.BuildSearchQuery(),
+		FileName: track.FileName(),
+		Tags: downloader.Tags{
+			Artist: track.JoinArtistNames(),
+			Title:  track.Name,
+			Album:  track.Album.Name,
+		},
+		DurationMS: track.DurationMS,
 	}
 }
 
