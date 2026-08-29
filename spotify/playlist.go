@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strings"
 )
 
 // Playlist is a single playlist in the user's library.
@@ -83,6 +84,15 @@ type Track struct {
 	Name       string   `json:"name"`
 	Artists    []Artist `json:"artists"`
 	DurationMS int      `json:"duration_ms"`
+}
+
+func (t Track) JoinArtistNames() string {
+	fullArtistStringSlice := make([]string, 0, len(t.Artists))
+	for _, artist := range t.Artists {
+		fullArtistStringSlice = append(fullArtistStringSlice, strings.TrimSpace(artist.Name))
+	}
+
+	return strings.Join(fullArtistStringSlice, ", ")
 }
 
 type PlaylistTrackItem struct {

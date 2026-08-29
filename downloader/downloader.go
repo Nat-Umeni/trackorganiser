@@ -31,7 +31,9 @@ func NewAudioDownloader(outputDir string) (*AudioDownloader, error) {
 func (d *AudioDownloader) DownloadBestAudio(query string) error {
 	cmd := exec.Command(
 		"yt-dlp",
-		"-x", "--audio-format", "mp3", "--audio-quality", "192",
+		"-x", "--audio-format", "wav", "--audio-quality", "192",
+		"-f", "bestaudio",
+		"--no-overwrites",
 		"--output", d.OutputDir+"/%(title)s.%(ext)s",
 		"ytsearch:"+query,
 	)

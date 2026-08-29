@@ -108,7 +108,6 @@ func main() {
 	}
 
 	for playlistName, tracksToDownload := range tracksByPlaylist {
-		
 		playlistPath := filepath.Join(downloadPath, playlistName)
 
 		dl, downloaderErr := downloader.NewAudioDownloader(playlistPath)
@@ -119,7 +118,7 @@ func main() {
 		for index, track := range tracksToDownload {
 			fmt.Printf("\nWould have downloaded track: %d - %s by %s\n\n", index, track.Name, track.Artists[0].Name)
 		}
-		
+
 	}
 
 }
