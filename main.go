@@ -17,15 +17,6 @@ import (
 	"github.com/joho/godotenv"
 )
 
-// stdin is created once and reused. A bufio.Scanner buffers ahead, so making a
-// new one per prompt can swallow input that has already been read.
-var stdin = bufio.NewScanner(os.Stdin)
-
-// ErrDownloadDirDeclined means the user chose not to create the download
-// directory. It is a normal outcome rather than a failure, so callers should
-// match it with errors.Is and exit quietly.
-var ErrDownloadDirDeclined = errors.New("no download directory to save to")
-
 const dryRun = true
 
 func init() {
@@ -34,10 +25,42 @@ func init() {
 	}
 }
 
+// ErrDownloadDirDeclined means the user chose not to create the download
+// directory. It is a normal outcome rather than a failure, so callers should
+// match it with errors.Is and exit quietly.
+var ErrDownloadDirDeclined = errors.New("no download directory to save to")
+
+// stdin is created once and reused. A bufio.Scanner buffers ahead, so making a
+// new one per prompt can swallow input that has already been read.
+var stdin = bufio.NewScanner(os.Stdin)
+
 func main() {
 	clientID := os.Getenv("SPOTIFY_CLIENT_ID")
 	if clientID == "" {
 		log.Fatal("SPOTIFY_CLIENT_ID not set")
+	}
+
+	ytdlpPath, err := downloader.FindYtDlp()
+	if errors.Is(err, downloader.ErrYtDlpMissing) {
+		answer, readErr := readLine("yt-dlp isn't installed, download it? [Y/n]")
+		if readErr != nil {
+			log.Fatal("failed to determine your input: ", readErr)
+		}
+
+		if strings.EqualFold(answer, "n") || strings.EqualFold(answer, "no") {
+			fmt.Println("Stopping")
+			return
+		}
+
+		ytdlpPath, err = downloader.InstallYtDlp()
+		if err != nil {
+			log.Fatalf("failed to install YtDlp dependency: %v", err)
+		}
+	}
+
+	// Alert for non cannot find ytdlp errs
+	if err != nil {
+		log.Fatal("failed to find ytdlp for an unknown reason: ", err)
 	}
 
 	// Set up Spotify and collect playlists
@@ -111,7 +134,7 @@ func main() {
 	for playlistName, tracksToDownload := range tracksByPlaylist {
 		playlistPath := filepath.Join(downloadPath, playlistName)
 
-		dl, downloaderErr := downloader.NewAudioDownloader(playlistPath)
+		dl, downloaderErr := downloader.NewAudioDownloader(playlistPath, ytdlpPath)
 		if downloaderErr != nil {
 			log.Fatal("Failed to set up downloader on that path: ", downloaderErr)
 		}

@@ -11,6 +11,7 @@ import (
 
 type AudioDownloader struct {
 	OutputDir string
+	YtdlpPath string
 }
 
 type Tags struct {
@@ -19,12 +20,7 @@ type Tags struct {
 	Album  string
 }
 
-func NewAudioDownloader(outputDir string) (*AudioDownloader, error) {
-	// Check yt-dlp presence
-	if _, err := exec.LookPath("yt-dlp"); err != nil {
-		return nil, fmt.Errorf("yt-dlp not found. Please install it: https://github.com/yt-dlp/yt-dlp#installation")
-	}
-
+func NewAudioDownloader(outputDir string, ytdlpPath string) (*AudioDownloader, error) {
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
 		return nil, fmt.Errorf("ffmpeg not found. Please install it: https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip")
 	}
@@ -34,14 +30,13 @@ func NewAudioDownloader(outputDir string) (*AudioDownloader, error) {
 		return nil, fmt.Errorf("create output dir: %w", err)
 	}
 
-	return &AudioDownloader{OutputDir: outputDir}, nil
+	return &AudioDownloader{OutputDir: outputDir, YtdlpPath: ytdlpPath}, nil
 }
 
 func (d *AudioDownloader) DownloadBestAudio(query string, filename string, tags Tags) error {
 	filepathForDownloader := filepath.Join(d.OutputDir, filename)
 
-	cmd := exec.Command(
-		"yt-dlp",
+	cmd := exec.Command(d.YtdlpPath,
 		"-f", "bestaudio",
 		"-x",
 		"--audio-format", "mp3",
