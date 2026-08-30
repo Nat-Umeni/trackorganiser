@@ -134,6 +134,7 @@ func main() {
 	// Collected across every playlist and printed at the end. An inline warning
 	// is lost among hundreds of tracks; a short list afterwards is actionable.
 	var mismatches []string
+	skipped := 0
 
 	for playlistName, tracksToDownload := range tracksByPlaylist {
 		playlistPath := filepath.Join(downloadPath, playlistName)
@@ -144,12 +145,20 @@ func main() {
 		}
 
 		for index, track := range tracksToDownload {
+			// Checked above the dry run so a dry run reports what would really
+			// happen. The scan is recursive, so a track filed into a genre
+			// subfolder by hand still counts as downloaded.
+			if dl.Has(track.FileName()) {
+				skipped++
+				continue
+			}
+
 			if dryRun {
 				fmt.Printf("\nWould have downloaded track: %d - %s as %s\n\n", index, track.Name, track.FileName())
 				continue
 			}
 
-			fmt.Printf("\nDownloading track: %d - %s by %s\n\n", index, track.Name, track.JoinArtistNames())
+			fmt.Printf("Downloading track: %d - %s by %s\n", index, track.Name, track.JoinArtistNames())
 
 			err := dl.DownloadBestAudio(buildRequest(track))
 			switch {
@@ -162,6 +171,10 @@ func main() {
 				fmt.Printf("Failed: %s — %v\n", track.FileName(), err)
 			}
 		}
+	}
+
+	if skipped > 0 {
+		fmt.Printf("\nSkipped %d track(s) already downloaded.\n", skipped)
 	}
 
 	if len(mismatches) > 0 {
