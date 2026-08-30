@@ -3,11 +3,17 @@ package main
 import (
 	"bufio"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/Nat-Umeni/trackorganiser/downloader"
+	"github.com/Nat-Umeni/trackorganiser/spotify"
 )
 
 // feedStdin replaces the package level scanner for the duration of one test so
@@ -235,4 +241,148 @@ func TestEnsureOutputLocationExistsExpandsTilde(t *testing.T) {
 			t.Errorf("got %q, want a path ending in ~otheruser", got)
 		}
 	})
+}
+
+func TestClampJobs(t *testing.T) {
+	tests := []struct {
+		name string
+		jobs int
+		want int
+	}{
+		{name: "the default", jobs: 4, want: 4},
+		{name: "one is allowed", jobs: 1, want: 1},
+		{name: "the ceiling is allowed", jobs: maxJobs, want: maxJobs},
+		{name: "just under the ceiling", jobs: maxJobs - 1, want: maxJobs - 1},
+
+		// A typo must not fire hundreds of requests at YouTube.
+		{name: "above the ceiling", jobs: maxJobs + 1, want: maxJobs},
+		{name: "wildly above the ceiling", jobs: 5000, want: maxJobs},
+
+		// Zero would mean a semaphore with no slots, which deadlocks on the
+		// first send. Negative would panic in make().
+		{name: "zero", jobs: 0, want: 1},
+		{name: "negative", jobs: -3, want: 1},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := clampJobs(test.jobs); got != test.want {
+				t.Errorf("clampJobs(%d) = %d, want %d", test.jobs, got, test.want)
+			}
+		})
+	}
+}
+
+// fakeYtdlp writes a stand-in for yt-dlp that exits 0 without downloading, the
+// way the real one behaves when a search finds nothing.
+func fakeYtdlp(t *testing.T) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "yt-dlp-stub")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatalf("setting up: %v", err)
+	}
+
+	return path
+}
+
+// silentTrack generates a two second mp3 with ffmpeg, which is already a hard
+// dependency. Real audio is needed because the duration check runs ffprobe over
+// it - arbitrary bytes would fail to probe and never reach the mismatch path.
+func silentTrack(t *testing.T) []byte {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "silence.mp3")
+	cmd := exec.Command("ffmpeg", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono", "-t", "2", "-y", path)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Skipf("ffmpeg could not generate test audio: %v\n%s", err, output)
+	}
+
+	audio, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("setting up: %v", err)
+	}
+
+	return audio
+}
+
+func TestDownloadTracksReportsEveryMismatch(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the yt-dlp stand-in relies on a shell script")
+	}
+
+	const trackCount = 20
+	outputDir := t.TempDir()
+	audio := silentTrack(t)
+
+	// Pre-place the audio where each download would land. The stand-in yt-dlp
+	// writes nothing, so this is what lets DownloadBestAudio get past its
+	// os.Stat check and reach the tagging and duration steps.
+	tracks := make([]spotify.Track, 0, trackCount)
+	for index := range trackCount {
+		track := spotify.Track{
+			ID:      fmt.Sprintf("id%d", index),
+			Name:    fmt.Sprintf("Track %d", index),
+			Artists: []spotify.Artist{{Name: "Someone"}},
+			// Three minutes against two seconds of audio, so every track is
+			// well outside the tolerance and takes the locked append path.
+			DurationMS: 180000,
+		}
+		tracks = append(tracks, track)
+
+		path := filepath.Join(outputDir, track.FileName()+".mp3")
+		if err := os.WriteFile(path, audio, 0644); err != nil {
+			t.Fatalf("setting up: %v", err)
+		}
+	}
+
+	dl, err := downloader.NewAudioDownloader(outputDir, fakeYtdlp(t))
+	if err != nil {
+		t.Skipf("downloader unavailable on this machine: %v", err)
+	}
+
+	// Deliberately more workers than the semaphore would need, to get real
+	// contention on the shared slice. Run under -race to make this meaningful.
+	mismatches := downloadTracks(dl, tracks, 8)
+
+	// The point of the test: a lost append under concurrency shows up here as a
+	// short list, and nowhere else.
+	if len(mismatches) != trackCount {
+		t.Errorf("got %d mismatch(es), want %d - an append was lost", len(mismatches), trackCount)
+	}
+}
+
+func TestDownloadTracksWithOneWorker(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the yt-dlp stand-in relies on a shell script")
+	}
+
+	// A semaphore off by one would deadlock here rather than anywhere else, so
+	// the single worker case is worth its own test.
+	tracks := []spotify.Track{
+		{ID: "a", Name: "First", Artists: []spotify.Artist{{Name: "Someone"}}},
+		{ID: "b", Name: "Second", Artists: []spotify.Artist{{Name: "Someone"}}},
+	}
+
+	dl, err := downloader.NewAudioDownloader(t.TempDir(), fakeYtdlp(t))
+	if err != nil {
+		t.Skipf("downloader unavailable on this machine: %v", err)
+	}
+
+	// Nothing is pre-placed, so every track fails with "no YouTube results" and
+	// none of them count as a mismatch.
+	if mismatches := downloadTracks(dl, tracks, 1); len(mismatches) != 0 {
+		t.Errorf("got %v, want no mismatches when nothing downloaded", mismatches)
+	}
+}
+
+func TestDownloadTracksWithNoTracks(t *testing.T) {
+	dl, err := downloader.NewAudioDownloader(t.TempDir(), fakeYtdlp(t))
+	if err != nil {
+		t.Skipf("downloader unavailable on this machine: %v", err)
+	}
+
+	if mismatches := downloadTracks(dl, nil, 4); len(mismatches) != 0 {
+		t.Errorf("got %v, want nothing back for an empty track list", mismatches)
+	}
 }

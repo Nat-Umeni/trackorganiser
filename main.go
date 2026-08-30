@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/Nat-Umeni/trackorganiser/downloader"
 	"github.com/Nat-Umeni/trackorganiser/spotify"
@@ -144,7 +146,7 @@ func main() {
 	var mismatches []string
 	skipped := 0
 
-	for playlistName, tracksToDownload := range tracksByPlaylist {
+	for playlistName, playlistTracks := range tracksByPlaylist {
 		playlistPath := filepath.Join(downloadPath, playlistName)
 
 		dl, downloaderErr := downloader.NewAudioDownloader(playlistPath, ytdlpPath)
@@ -152,7 +154,9 @@ func main() {
 			log.Fatal("Failed to set up downloader on that path: ", downloaderErr)
 		}
 
-		for index, track := range tracksToDownload {
+		var toDownload []spotify.Track
+
+		for index, track := range playlistTracks {
 			// Checked above the dry run so a dry run reports what would really
 			// happen. The scan is recursive, so a track filed into a genre
 			// subfolder by hand still counts as downloaded.
@@ -166,19 +170,10 @@ func main() {
 				continue
 			}
 
-			fmt.Printf("Downloading track: %d - %s by %s\n", index, track.Name, track.JoinArtistNames())
-
-			err := dl.DownloadBestAudio(buildRequest(track))
-			switch {
-			case errors.Is(err, downloader.ErrDurationMismatch):
-				// Not a failure - the file downloaded and was tagged. Keep it and
-				// flag it, because an extended mix or a live version is often
-				// worth having.
-				mismatches = append(mismatches, fmt.Sprintf("%s — %v", track.FileName(), err))
-			case err != nil:
-				fmt.Printf("Failed: %s — %v\n", track.FileName(), err)
-			}
+			toDownload = append(toDownload, track)
 		}
+
+		mismatches = append(mismatches, downloadTracks(dl, toDownload, jobs)...)
 	}
 
 	if skipped > 0 {
@@ -191,6 +186,72 @@ func main() {
 			fmt.Printf("  %s\n", mismatch)
 		}
 	}
+}
+
+// downloadTracks fetches up to jobs tracks at a time and returns a line for each
+// one whose length didn't match Spotify. Most of a download is spent waiting on
+// the network, which is why running several at once helps. The ceiling is
+// YouTube's tolerance for parallel requests from one IP, not the CPU.
+func downloadTracks(dl *downloader.AudioDownloader, tracks []spotify.Track, jobs int) []string {
+	var mismatches []string
+
+	// A buffered channel used as a counting semaphore: a car park with `jobs`
+	// spaces. Sending takes a ticket, receiving hands it back, and a send blocks
+	// once every ticket is out. The element type is struct{} because the values
+	// are never read - only whether a slot is occupied - and an empty struct
+	// takes no memory.
+	downloadSlots := make(chan struct{}, jobs)
+
+	// Tracks the goroutines that haven't finished, so the last one can be waited
+	// for before returning.
+	var pendingDownloads sync.WaitGroup
+
+	// Named after what it guards: mismatches is appended to from several
+	// goroutines at once, which is a data race without this.
+	var mismatchesLock sync.Mutex
+
+	// Counted on completion rather than on start. With several running at once
+	// the order is unpredictable, but the count is monotonic, so it tells you how
+	// far through the run you are.
+	var completed atomic.Int64
+
+	for _, track := range tracks {
+		// The barrier, and it belongs out here rather than inside the goroutine.
+		// Inside, the loop would launch every goroutine immediately and they
+		// would queue up internally - the limit would do nothing.
+		downloadSlots <- struct{}{}
+		pendingDownloads.Go(func() {
+			// Deferred so the slot comes back however this exits. Releasing at
+			// the top instead would free the ticket before doing any work, and
+			// every track would start at once.
+			defer func() { <-downloadSlots }()
+
+			err := dl.DownloadBestAudio(buildRequest(track))
+
+			fmt.Printf("%d/%d - %s\n", completed.Add(1), len(tracks), track.FileName())
+
+			switch {
+			case errors.Is(err, downloader.ErrDurationMismatch):
+				// Not a failure - the file downloaded and was tagged. Keep it and
+				// flag it, because an extended mix or a live version is often
+				// worth having.
+
+				// Locked around the append only. Holding it across the download
+				// above would serialise everything and undo the concurrency.
+				mismatchesLock.Lock()
+				mismatches = append(mismatches, fmt.Sprintf("%s — %v", track.FileName(), err))
+				mismatchesLock.Unlock()
+			case err != nil:
+				fmt.Printf("Failed: %s — %v\n", track.FileName(), err)
+			}
+		})
+	}
+
+	// Without this the function would return as soon as everything was launched,
+	// handing back an empty slice while downloads were still running.
+	pendingDownloads.Wait()
+
+	return mismatches
 }
 
 func clampJobs(n int) int {
