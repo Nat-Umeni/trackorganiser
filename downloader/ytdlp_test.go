@@ -1,6 +1,11 @@
 package downloader
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"runtime"
+	"testing"
+)
 
 // ytdlpAssetName takes goos and arch as parameters rather than reading runtime
 // directly, which is what lets every platform be asserted from one machine.
@@ -50,6 +55,58 @@ func TestYtdlpAssetName(t *testing.T) {
 			}
 			if got != test.want {
 				t.Errorf("ytdlpAssetName(%q, %q) = %q, want %q", test.goos, test.arch, got, test.want)
+			}
+		})
+	}
+}
+
+// fakeRuntimes creates empty executables named after JS runtimes on a PATH of
+// their own, so FindJSRuntime can be tested without any of them installed.
+func fakeRuntimes(t *testing.T, names ...string) {
+	t.Helper()
+
+	dir := t.TempDir()
+	for _, name := range names {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0755); err != nil {
+			t.Fatalf("setting up %q: %v", name, err)
+		}
+	}
+
+	t.Setenv("PATH", dir)
+}
+
+func TestFindJSRuntime(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("PATH lookup expects unix executable bits")
+	}
+
+	tests := []struct {
+		name      string
+		installed []string
+		want      string
+	}{
+		// yt-dlp's own documented priority is deno, node, quickjs, bun - the
+		// pick should match what it would have chosen itself.
+		{name: "deno wins over node", installed: []string{"deno", "node"}, want: "deno"},
+		{name: "node wins over quickjs", installed: []string{"node", "quickjs"}, want: "node"},
+		{name: "quickjs wins over bun", installed: []string{"quickjs", "bun"}, want: "quickjs"},
+		{name: "all four installed", installed: []string{"bun", "quickjs", "node", "deno"}, want: "deno"},
+
+		{name: "only node", installed: []string{"node"}, want: "node"},
+		{name: "only bun", installed: []string{"bun"}, want: "bun"},
+
+		// Not an error: yt-dlp still runs, just with fewer formats.
+		{name: "none installed", installed: nil, want: ""},
+		{name: "something unrelated", installed: []string{"python3", "curl"}, want: ""},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fakeRuntimes(t, test.installed...)
+
+			if got := FindJSRuntime(); got != test.want {
+				t.Errorf("FindJSRuntime() = %q, want %q", got, test.want)
 			}
 		})
 	}

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -238,5 +239,71 @@ func TestNewAudioDownloaderScansExistingFiles(t *testing.T) {
 	}
 	if downloader.Has("Boiled Egg - Velveteen Hush") {
 		t.Error("constructor reported a track that is not there")
+	}
+}
+
+func TestYtdlpArgs(t *testing.T) {
+	const outputPath = "/music/Playlist/Touch - KATSEYE"
+	const query = "Touch KATSEYE topic"
+
+	tests := []struct {
+		name       string
+		jsRuntime  string
+		useCookies bool
+		wantFlags  []string
+		notWant    []string
+	}{
+		{
+			name:      "neither available",
+			notWant:   []string{"--js-runtimes", "--cookies-from-browser"},
+			wantFlags: []string{"--audio-format", "mp3", "--no-overwrites"},
+		},
+		{
+			name:      "js runtime only",
+			jsRuntime: "node",
+			wantFlags: []string{"--js-runtimes", "node"},
+			notWant:   []string{"--cookies-from-browser"},
+		},
+		{
+			name:       "cookies only",
+			useCookies: true,
+			wantFlags:  []string{"--cookies-from-browser", "firefox"},
+			notWant:    []string{"--js-runtimes"},
+		},
+		{
+			// The combination that fixes age-restricted tracks - neither alone
+			// is enough.
+			name:       "both",
+			jsRuntime:  "deno",
+			useCookies: true,
+			wantFlags:  []string{"--js-runtimes", "deno", "--cookies-from-browser", "firefox"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			args := ytdlpArgs(outputPath, query, test.jsRuntime, test.useCookies)
+			joined := strings.Join(args, " ")
+
+			for _, flag := range test.wantFlags {
+				if !slices.Contains(args, flag) {
+					t.Errorf("args %q missing %q", joined, flag)
+				}
+			}
+			for _, flag := range test.notWant {
+				if slices.Contains(args, flag) {
+					t.Errorf("args %q should not contain %q", joined, flag)
+				}
+			}
+
+			// The search term has to stay last - yt-dlp takes it positionally,
+			// so a flag appended after it would be read as another URL.
+			if last := args[len(args)-1]; last != "ytsearch:"+query {
+				t.Errorf("last arg is %q, want the ytsearch term", last)
+			}
+			if !slices.Contains(args, outputPath+".%(ext)s") {
+				t.Errorf("args %q missing the output template", joined)
+			}
+		})
 	}
 }

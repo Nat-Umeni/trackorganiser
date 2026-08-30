@@ -27,6 +27,12 @@ type AudioDownloader struct {
 	// OutputDir, at any depth. Playlist folders get genre subfolders made by
 	// hand, so a track that has been filed away must still count as downloaded.
 	existing map[string]bool
+
+	// Both probed once at construction. Empty and false respectively are valid -
+	// yt-dlp runs without either, just with fewer formats and no age-gated
+	// tracks.
+	jsRuntime  string
+	useCookies bool
 }
 
 type Tags struct {
@@ -80,11 +86,48 @@ func NewAudioDownloader(outputDir string, ytdlpPath string) (*AudioDownloader, e
 		return nil, fmt.Errorf("create output dir: %w", err)
 	}
 
+	// A missing home directory only means no cookies, which is survivable.
+	home, _ := os.UserHomeDir()
+
 	return &AudioDownloader{
-		OutputDir: outputDir,
-		YtdlpPath: ytdlpPath,
-		existing:  findExistingTracks(outputDir),
+		OutputDir:  outputDir,
+		YtdlpPath:  ytdlpPath,
+		existing:   findExistingTracks(outputDir),
+		jsRuntime:  FindJSRuntime(),
+		useCookies: FirefoxCookiesAvailable(home),
 	}, nil
+}
+
+// ytdlpArgs assembles the command line for one download. Split out from
+// DownloadBestAudio so the conditional flags can be asserted without running
+// anything.
+func ytdlpArgs(outputPath, query, jsRuntime string, useCookies bool) []string {
+	args := []string{
+		// The "/" is a fallback: best audio-only stream, or failing that the
+		// best anything. Some videos only offer formats behind a PO token, and
+		// without the fallback yt-dlp reports "Requested format is not
+		// available" rather than taking a combined stream. -x strips the video
+		// either way, so the only cost is wasted bytes on those few tracks.
+		"-f", "bestaudio/best",
+		"-x",
+		"--audio-format", "mp3",
+		"--audio-quality", "320k",
+		"--output", outputPath + ".%(ext)s",
+		"--no-overwrites",
+	}
+
+	// Without a runtime, yt-dlp reports available videos as "This video is not
+	// available" and silently skips formats.
+	if jsRuntime != "" {
+		args = append(args, "--js-runtimes", jsRuntime)
+	}
+
+	// Age-restricted tracks need this, and it only works alongside a JS runtime.
+	if useCookies {
+		args = append(args, "--cookies-from-browser", "firefox")
+	}
+
+	return append(args, "ytsearch:"+query)
 }
 
 // findExistingTracks lists every mp3 under root, at any depth, keyed by
@@ -122,14 +165,9 @@ func (d *AudioDownloader) Has(fileName string) bool {
 func (d *AudioDownloader) DownloadBestAudio(req Request) error {
 	filepathForDownloader := filepath.Join(d.OutputDir, req.FileName)
 
-	cmd := exec.Command(d.YtdlpPath,
-		"-f", "bestaudio",
-		"-x",
-		"--audio-format", "mp3",
-		"--audio-quality", "320k",
-		"--output", filepathForDownloader+".%(ext)s",
-		"--no-overwrites",
-		"ytsearch:"+req.Query,
+	cmd := exec.Command(
+		d.YtdlpPath,
+		ytdlpArgs(filepathForDownloader, req.Query, d.jsRuntime, d.useCookies)...,
 	)
 
 	output, err := cmd.CombinedOutput()

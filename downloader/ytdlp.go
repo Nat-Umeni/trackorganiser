@@ -125,3 +125,27 @@ func ytdlpAssetName(goos, arch string) (string, error) {
 		return "", fmt.Errorf("unsupported platform %s/%s, install yt-dlp manually: https://github.com/yt-dlp/yt-dlp#installation", goos, arch)
 	}
 }
+
+// jsRuntimes are the JavaScript runtimes yt-dlp supports, in its own documented
+// priority order. Only deno is enabled by default, so anything else has to be
+// named explicitly with --js-runtimes.
+var jsRuntimes = []string{"deno", "node", "quickjs", "bun"}
+
+// FindJSRuntime returns the name of a JavaScript runtime yt-dlp can use, or an
+// empty string if none is installed.
+//
+// This matters more than it sounds: yt-dlp has deprecated YouTube extraction
+// without a runtime, and without one a perfectly available video reports as
+// "This video is not available". Some formats are also silently skipped.
+//
+// Missing entirely is not an error - yt-dlp still works, just with fewer formats
+// - so refusing to run would be the worse trade.
+func FindJSRuntime() string {
+	for _, runtime := range jsRuntimes {
+		if _, err := exec.LookPath(runtime); err == nil {
+			return runtime
+		}
+	}
+
+	return ""
+}

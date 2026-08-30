@@ -73,6 +73,8 @@ func main() {
 		log.Fatal("failed to find ytdlp for an unknown reason: ", err)
 	}
 
+	reportYtdlpExtras()
+
 	// Set up Spotify and collect playlists
 	client, err := spotify.NewClient(clientID)
 	if err != nil {
@@ -399,4 +401,23 @@ func dd(v any) {
 	out, _ := json.MarshalIndent(v, "", "  ")
 	fmt.Println(string(out))
 	os.Exit(1)
+}
+
+// reportYtdlpExtras says what optional yt-dlp support was found, so a run that
+// silently has neither is visible rather than mysterious. Both are survivable
+// when missing, which is exactly why they need announcing - the symptoms
+// otherwise look like unrelated download failures.
+func reportYtdlpExtras() {
+	if jsRuntime := downloader.FindJSRuntime(); jsRuntime != "" {
+		fmt.Printf("Using %s for YouTube extraction.\n", jsRuntime)
+	} else {
+		fmt.Println("No JavaScript runtime found (deno, node, quickjs or bun) - some tracks will wrongly report as unavailable.")
+	}
+
+	home, _ := os.UserHomeDir()
+	if downloader.FirefoxCookiesAvailable(home) {
+		fmt.Println("Using Firefox cookies for age-restricted tracks.")
+	} else {
+		fmt.Println("No Firefox cookies found - age-restricted tracks will fail.")
+	}
 }
