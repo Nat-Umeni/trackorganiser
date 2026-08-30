@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io/fs"
 	"log"
@@ -17,7 +18,7 @@ import (
 	"github.com/joho/godotenv"
 )
 
-const dryRun = false
+const maxJobs = 16
 
 func init() {
 	if err := godotenv.Load(); err != nil {
@@ -35,6 +36,13 @@ var ErrDownloadDirDeclined = errors.New("no download directory to save to")
 var stdin = bufio.NewScanner(os.Stdin)
 
 func main() {
+	var jobs int
+	var dryRun bool
+	flag.IntVar(&jobs, "jobs", 4, "how many tracks to download at once (1-16) - higher risks rate limiting")
+	flag.BoolVar(&dryRun, "dry-run", false, "list the filename each track would get without downloading anything")
+	flag.Parse()
+	jobs = clampJobs(jobs)
+
 	clientID := os.Getenv("SPOTIFY_CLIENT_ID")
 	if clientID == "" {
 		log.Fatal("SPOTIFY_CLIENT_ID not set")
@@ -183,6 +191,18 @@ func main() {
 			fmt.Printf("  %s\n", mismatch)
 		}
 	}
+}
+
+func clampJobs(n int) int {
+	if n < 1 {
+		return 1
+	}
+
+	if n > maxJobs {
+		return maxJobs
+	}
+
+	return n
 }
 
 func buildRequest(track spotify.Track) downloader.Request {
