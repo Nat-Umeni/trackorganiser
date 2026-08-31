@@ -19,6 +19,27 @@ import (
 // the wrong song. The file is kept; callers should report it, not delete it.
 var ErrDurationMismatch = errors.New("downloaded audio length does not match Spotify")
 
+// ErrVersionMismatch means yt-dlp returned a different cut of the track - a
+// different remix, say. Unlike a length difference this is nearly always wrong,
+// but the file is still kept for the caller to judge.
+var ErrVersionMismatch = errors.New("downloaded a different version")
+
+// readTitleFile returns what yt-dlp recorded, or an empty string if anything at
+// all went wrong. An unreadable title only means the version cannot be checked;
+// the mp3 is downloaded and tagged either way.
+func readTitleFile(path string) string {
+	if path == "" {
+		return ""
+	}
+
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+
+	return strings.TrimSpace(string(contents))
+}
+
 type AudioDownloader struct {
 	OutputDir string
 	YtdlpPath string
@@ -101,7 +122,7 @@ func NewAudioDownloader(outputDir string, ytdlpPath string) (*AudioDownloader, e
 // ytdlpArgs assembles the command line for one download. Split out from
 // DownloadBestAudio so the conditional flags can be asserted without running
 // anything.
-func ytdlpArgs(outputPath, query, jsRuntime string, useCookies bool) []string {
+func ytdlpArgs(outputPath, query, jsRuntime, titlePath string, useCookies bool) []string {
 	args := []string{
 		// The "/" is a fallback: best audio-only stream, or failing that the
 		// best anything. Some videos only offer formats behind a PO token, and
@@ -125,6 +146,17 @@ func ytdlpArgs(outputPath, query, jsRuntime string, useCookies bool) []string {
 	// Age-restricted tracks need this, and it only works alongside a JS runtime.
 	if useCookies {
 		args = append(args, "--cookies-from-browser", "firefox")
+	}
+
+	// Records what yt-dlp actually picked, so the version can be checked against
+	// what Spotify asked for. "after_move" matters: --print implies --simulate
+	// unless a later stage is named, and simulating would download nothing.
+	//
+	// The path is a temp file rather than one derived from the track name
+	// because this argument is parsed as an output template - a track called
+	// "100% Pure" would otherwise mangle it.
+	if titlePath != "" {
+		args = append(args, "--print-to-file", "after_move:%(title)s", titlePath)
 	}
 
 	return append(args, "ytsearch:"+query)
@@ -165,9 +197,18 @@ func (d *AudioDownloader) Has(fileName string) bool {
 func (d *AudioDownloader) DownloadBestAudio(req Request) error {
 	filepathForDownloader := filepath.Join(d.OutputDir, req.FileName)
 
+	// Failing to make the temp file only costs the version check, so the error
+	// is deliberately ignored - titlePath stays empty and the flag is skipped.
+	titlePath := ""
+	if titleFile, err := os.CreateTemp("", "trackorganiser-title-*"); err == nil {
+		titlePath = titleFile.Name()
+		titleFile.Close()
+		defer os.Remove(titlePath)
+	}
+
 	cmd := exec.Command(
 		d.YtdlpPath,
-		ytdlpArgs(filepathForDownloader, req.Query, d.jsRuntime, d.useCookies)...,
+		ytdlpArgs(filepathForDownloader, req.Query, d.jsRuntime, titlePath, d.useCookies)...,
 	)
 
 	output, err := cmd.CombinedOutput()
@@ -186,6 +227,15 @@ func (d *AudioDownloader) DownloadBestAudio(req Request) error {
 
 	if err := addTagsToFile(downloadedPath, req.Tags); err != nil {
 		return err
+	}
+
+	// Checked before the duration, because it is the more meaningful signal: a
+	// wrong remix is wrong, whereas a length difference is often just a radio
+	// edit that is perfectly usable.
+	if youtubeTitle := readTitleFile(titlePath); youtubeTitle != "" {
+		if !versionMatches(req.Tags.Title, youtubeTitle) {
+			return fmt.Errorf("%w: wanted %q, got %q", ErrVersionMismatch, req.Tags.Title, youtubeTitle)
+		}
 	}
 
 	// ffprobe failing is not a reason to fail the download - the mp3 is fine and

@@ -94,6 +94,18 @@ func (c *Client) FetchPlaylistTracks(playlist Playlist) ([]Track, error) {
 		if resp.StatusCode != http.StatusOK {
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
+
+			// Spotify sends a bare "Forbidden" with no explanation. It means the
+			// playlist is only followed, not owned or collaborated on - reading
+			// its items needs one of those. Copying it into your own account is
+			// the workaround.
+			if resp.StatusCode == http.StatusForbidden {
+				return nil, fmt.Errorf(
+					"owned by %s, and you can only read playlists you own or collaborate on - make your own copy of it to download it",
+					playlist.PlaylistOwner.DisplayName,
+				)
+			}
+
 			return nil, fmt.Errorf("Spotify API error %d: %s", resp.StatusCode, string(body))
 		}
 

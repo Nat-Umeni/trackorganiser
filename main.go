@@ -86,8 +86,11 @@ func main() {
 		log.Fatal("Error fetching playlists:", err)
 	}
 
+	// The owner is shown because only playlists you own or collaborate on can be
+	// read - anything else returns 403. Two playlists with near-identical names,
+	// one yours and one followed, are otherwise indistinguishable in this list.
 	for index, playlist := range playlists {
-		fmt.Printf("%d - %s\n", index+1, playlist.Name)
+		fmt.Printf("%d - %s  (%s)\n", index+1, playlist.Name, playlist.PlaylistOwner.DisplayName)
 	}
 	userInput, playlistInputErr := readLine("\nType the numbers of the playlists you would like to save to disk, separated by commas OR by dashes. IE: 1,3,5 OR 4-7 \n\n")
 
@@ -233,7 +236,8 @@ func downloadTracks(dl *downloader.AudioDownloader, tracks []spotify.Track, jobs
 			fmt.Printf("%d/%d - %s\n", completed.Add(1), len(tracks), track.FileName())
 
 			switch {
-			case errors.Is(err, downloader.ErrDurationMismatch):
+			case errors.Is(err, downloader.ErrDurationMismatch),
+				errors.Is(err, downloader.ErrVersionMismatch):
 				// Not a failure - the file downloaded and was tagged. Keep it and
 				// flag it, because an extended mix or a live version is often
 				// worth having.

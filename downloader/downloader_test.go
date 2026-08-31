@@ -249,14 +249,22 @@ func TestYtdlpArgs(t *testing.T) {
 	tests := []struct {
 		name       string
 		jsRuntime  string
+		titlePath  string
 		useCookies bool
 		wantFlags  []string
 		notWant    []string
 	}{
 		{
-			name:      "neither available",
-			notWant:   []string{"--js-runtimes", "--cookies-from-browser"},
-			wantFlags: []string{"--audio-format", "mp3", "--no-overwrites"},
+			name:      "nothing optional available",
+			notWant:   []string{"--js-runtimes", "--cookies-from-browser", "--print-to-file"},
+			wantFlags: []string{"--audio-format", "mp3", "--no-overwrites", "-f", "bestaudio/best"},
+		},
+		{
+			// "after_move" is what stops --print implying --simulate, which
+			// would download nothing at all.
+			name:      "title capture",
+			titlePath: "/tmp/some-title-file",
+			wantFlags: []string{"--print-to-file", "after_move:%(title)s", "/tmp/some-title-file"},
 		},
 		{
 			name:      "js runtime only",
@@ -273,16 +281,21 @@ func TestYtdlpArgs(t *testing.T) {
 		{
 			// The combination that fixes age-restricted tracks - neither alone
 			// is enough.
-			name:       "both",
+			name:       "all three",
 			jsRuntime:  "deno",
+			titlePath:  "/tmp/t",
 			useCookies: true,
-			wantFlags:  []string{"--js-runtimes", "deno", "--cookies-from-browser", "firefox"},
+			wantFlags: []string{
+				"--js-runtimes", "deno",
+				"--cookies-from-browser", "firefox",
+				"--print-to-file", "after_move:%(title)s", "/tmp/t",
+			},
 		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			args := ytdlpArgs(outputPath, query, test.jsRuntime, test.useCookies)
+			args := ytdlpArgs(outputPath, query, test.jsRuntime, test.titlePath, test.useCookies)
 			joined := strings.Join(args, " ")
 
 			for _, flag := range test.wantFlags {
