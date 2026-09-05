@@ -5,10 +5,22 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"math/big"
 	"net/url"
 	"os/exec"
+	"runtime"
 )
+
+// randomReader is where the PKCE randomness comes from. It is a variable so
+// tests can substitute a failing reader - the error paths below are otherwise
+// unreachable, since crypto/rand only fails if the OS entropy source is broken.
+var randomReader io.Reader = rand.Reader
+
+// spotifyAuthorizeURL is a variable for the same reason callSpotify's base URL
+// wants to be one: a hardcoded constant cannot be pointed somewhere else in a
+// test.
+var spotifyAuthorizeURL = "https://accounts.spotify.com/authorize"
 
 // generateCodeVerifier creates a high‑entropy random string for PKCE.
 func generateCodeVerifier() (string, error) {
@@ -16,7 +28,7 @@ func generateCodeVerifier() (string, error) {
 	const charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
 	verifier := make([]byte, length)
 	for i := range verifier {
-		num, err := rand.Int(rand.Reader, big.NewInt(int64(len(charset))))
+		num, err := rand.Int(randomReader, big.NewInt(int64(len(charset))))
 		if err != nil {
 			return "", fmt.Errorf("random generation failed: %w", err)
 		}
@@ -30,7 +42,7 @@ func generateState() (string, error) {
 	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	result := make([]byte, length)
 	for i := range result {
-		num, err := rand.Int(rand.Reader, big.NewInt(int64(len(charset))))
+		num, err := rand.Int(randomReader, big.NewInt(int64(len(charset))))
 		if err != nil {
 			return "", err
 		}
@@ -59,7 +71,7 @@ func initiateSpotifyAuth(clientID string) (code, codeVerifier, state string, err
 
 	codeChallenge := generateCodeChallenge(verifier)
 
-	authURL, err := url.Parse("https://accounts.spotify.com/authorize")
+	authURL, err := url.Parse(spotifyAuthorizeURL)
 	if err != nil {
 		return "", "", "", fmt.Errorf("parse auth URL: %w", err)
 	}
@@ -81,11 +93,10 @@ func initiateSpotifyAuth(clientID string) (code, codeVerifier, state string, err
 	}
 	defer shutdown() // clean up no matter what
 
-	// 3. Open browser
-	cmd := exec.Command("rundll32", "url.dll,FileProtocolHandler", authURL.String())
-	if err := cmd.Start(); err != nil {
-		return "", "", "", fmt.Errorf("open browser: %w", err)
-	}
+	// 3. Open browser. Failing to launch one is not fatal: the callback server
+	// above is already listening and the wait below still works, so printing the
+	// URL to paste by hand keeps the flow usable over SSH or on a headless box.
+	openURL(authURL.String())
 
 	// 4. Wait for the authorization code
 	fmt.Println("Waiting for you to authorize in the browser...")
@@ -95,4 +106,49 @@ func initiateSpotifyAuth(clientID string) (code, codeVerifier, state string, err
 	}
 
 	return code, verifier, state, nil
+}
+
+// browserOpenCommand names the command that opens a URL in the user's default
+// browser on the given platform, with its full argument list.
+//
+// goos is a parameter rather than runtime.GOOS so every platform is assertable
+// from one machine, the same as ytdlpAssetName and ffmpegInstallHint.
+//
+// Windows keeps rundll32 rather than the more common `cmd /c start`: the auth URL
+// is full of "&" query separators, which cmd treats as command chaining unless
+// carefully quoted. rundll32 takes the URL as one plain argument and sidesteps
+// the problem.
+func browserOpenCommand(goos, rawURL string) (string, []string, error) {
+	switch goos {
+	case "linux":
+		return "xdg-open", []string{rawURL}, nil
+	case "darwin":
+		return "open", []string{rawURL}, nil
+	case "windows":
+		return "rundll32", []string{"url.dll,FileProtocolHandler", rawURL}, nil
+	default:
+		return "", nil, fmt.Errorf("no known way to open a browser on %s", goos)
+	}
+}
+
+// startCommand launches a process without waiting for it. It is a variable so
+// tests can swap it out - otherwise testing openURL would genuinely open a
+// browser on the machine running the tests.
+//
+// Start rather than Run: the browser outlives us, and waiting for it to exit
+// would hang forever.
+var startCommand = func(name string, args ...string) error {
+	return exec.Command(name, args...).Start()
+}
+
+// openURL tries to launch a browser, and falls back to printing the URL. It
+// deliberately returns nothing: there is no failure here worth aborting for,
+// because a URL you can read is a URL you can paste.
+func openURL(rawURL string) {
+	name, args, err := browserOpenCommand(runtime.GOOS, rawURL)
+	if err == nil && startCommand(name, args...) == nil {
+		return
+	}
+
+	fmt.Printf("\nCouldn't open a browser automatically. Open this to authorise:\n\n  %s\n\n", rawURL)
 }
