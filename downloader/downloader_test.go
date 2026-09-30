@@ -1,12 +1,14 @@
 package downloader
 
 import (
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -662,5 +664,233 @@ func TestRefreshExistingWithoutADate(t *testing.T) {
 	}
 	if !after.ModTime().Equal(before.ModTime()) {
 		t.Errorf("mtime moved from %v to %v", before.ModTime(), after.ModTime())
+	}
+}
+
+// tinyJPEG is a real, minimal JPEG. It has to decode as an image rather than be
+// arbitrary bytes, because ffprobe is what verifies the frame landed.
+func tinyJPEG(t *testing.T) []byte {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "cover.jpg")
+	cmd := exec.Command("ffmpeg", "-f", "lavfi", "-i", "color=c=red:s=300x300:d=1",
+		"-frames:v", "1", "-y", path)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Skipf("ffmpeg could not generate a test image: %v\n%s", err, output)
+	}
+
+	image, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("setting up: %v", err)
+	}
+
+	return image
+}
+
+// downloaderWithArtServer gives a downloader, a tagged mp3 on disk, and a URL
+// serving a real JPEG with a counter so fetches can be proven or disproven.
+func downloaderWithArtServer(t *testing.T) (dl *AudioDownloader, path, url string, requests *atomic.Int64) {
+	t.Helper()
+
+	if runtime.GOOS == "windows" {
+		t.Skip("relies on ffmpeg and a shell stand-in")
+	}
+
+	root := t.TempDir()
+	path = filepath.Join(root, "Track - Someone.mp3")
+	if err := os.WriteFile(path, silentTrack(t), 0644); err != nil {
+		t.Fatalf("setting up: %v", err)
+	}
+
+	url, requests = fakeCDN(t, tinyJPEG(t), http.StatusOK)
+
+	dl, err := NewAudioDownloader(root, "yt-dlp")
+	if err != nil {
+		t.Skipf("downloader unavailable on this machine: %v", err)
+	}
+
+	return dl, path, url, requests
+}
+
+// hasArt reports whether the file carries an attached picture frame.
+func hasArt(t *testing.T, path string) bool {
+	t.Helper()
+
+	tag, err := id3v2.Open(path, id3v2.Options{Parse: true})
+	if err != nil {
+		t.Fatalf("reading tags: %v", err)
+	}
+	defer tag.Close()
+
+	return len(tag.GetFrames(tag.CommonID("Attached picture"))) > 0
+}
+
+func TestAddTagsToFileEmbedsArt(t *testing.T) {
+	dl, path, url, requests := downloaderWithArtServer(t)
+
+	if hasArt(t, path) {
+		t.Fatal("the file already had art before we started")
+	}
+
+	err := dl.addTagsToFile(path, Tags{
+		Title:       "Track",
+		Artist:      "Someone",
+		Album:       "An Album",
+		CoverArtURL: url,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !hasArt(t, path) {
+		t.Error("no attached picture after tagging")
+	}
+	if requests.Load() != 1 {
+		t.Errorf("made %d requests, want 1", requests.Load())
+	}
+}
+
+func TestAddTagsToFileLeavesExistingArtAlone(t *testing.T) {
+	// The "only if one isn't there" rule, and the reason a re-run over 297
+	// already-arted tracks costs nothing extra: the fetch never happens.
+	dl, path, url, requests := downloaderWithArtServer(t)
+
+	tags := Tags{Title: "Track", Artist: "Someone", CoverArtURL: url}
+
+	if err := dl.addTagsToFile(path, tags); err != nil {
+		t.Fatalf("first pass: %v", err)
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("first pass made %d requests, want 1", requests.Load())
+	}
+
+	// Fresh downloader so the in-memory cache cannot be what saves us - the
+	// check has to come from reading the file's existing frames.
+	second, err := NewAudioDownloader(filepath.Dir(path), "yt-dlp")
+	if err != nil {
+		t.Skipf("downloader unavailable: %v", err)
+	}
+
+	if err := second.addTagsToFile(path, tags); err != nil {
+		t.Fatalf("second pass: %v", err)
+	}
+
+	if requests.Load() != 1 {
+		t.Errorf("made %d requests over two passes, want 1 - existing art was not detected", requests.Load())
+	}
+	if !hasArt(t, path) {
+		t.Error("the art went missing on the second pass")
+	}
+}
+
+func TestAddTagsToFileWithoutAnArtURL(t *testing.T) {
+	dl, path, url, requests := downloaderWithArtServer(t)
+	_ = url
+
+	// No CoverArtURL - an album with no images, or a track Spotify gave none for.
+	err := dl.addTagsToFile(path, Tags{Title: "Track", Artist: "Someone"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if requests.Load() != 0 {
+		t.Errorf("made %d requests with no URL, want none", requests.Load())
+	}
+	if hasArt(t, path) {
+		t.Error("art was attached despite there being no URL")
+	}
+
+	// A bare http.Get("") fails on its own, so "no requests" alone would pass
+	// even without the guard. What the guard actually prevents is the cache
+	// being consulted at all, so assert that directly.
+	dl.cache.coverArtsLocker.Lock()
+	entries := len(dl.cache.coverArts)
+	dl.cache.coverArtsLocker.Unlock()
+
+	if entries != 0 {
+		t.Errorf("the cache holds %d entries, want none - the empty URL was looked up anyway", entries)
+	}
+}
+
+func TestAddTagsToFileSurvivesAFailedArtFetch(t *testing.T) {
+	// A cover that won't download is cosmetic. Losing the title and artist over
+	// it would not be.
+	if runtime.GOOS == "windows" {
+		t.Skip("relies on ffmpeg")
+	}
+
+	root := t.TempDir()
+	path := filepath.Join(root, "Track - Someone.mp3")
+	if err := os.WriteFile(path, silentTrack(t), 0644); err != nil {
+		t.Fatalf("setting up: %v", err)
+	}
+
+	deadURL, _ := fakeCDN(t, []byte("<html>gone</html>"), http.StatusNotFound)
+
+	dl, err := NewAudioDownloader(root, "yt-dlp")
+	if err != nil {
+		t.Skipf("downloader unavailable: %v", err)
+	}
+
+	if err := dl.addTagsToFile(path, Tags{
+		Title:       "Track",
+		Artist:      "Someone",
+		Album:       "An Album",
+		CoverArtURL: deadURL,
+	}); err != nil {
+		t.Fatalf("a failed cover fetch should not fail tagging: %v", err)
+	}
+
+	tag, err := id3v2.Open(path, id3v2.Options{Parse: true})
+	if err != nil {
+		t.Fatalf("reading tags back: %v", err)
+	}
+	defer tag.Close()
+
+	if got := tag.Title(); got != "Track" {
+		t.Errorf("title = %q, want it saved despite the cover failing", got)
+	}
+	if got := tag.Artist(); got != "Someone" {
+		t.Errorf("artist = %q, want it saved despite the cover failing", got)
+	}
+	if len(tag.GetFrames(tag.CommonID("Attached picture"))) != 0 {
+		t.Error("an empty picture frame was attached after the fetch failed")
+	}
+}
+
+func TestRefreshExistingAddsMissingArt(t *testing.T) {
+	// The path that brought 297 already-downloaded tracks into line: art is
+	// filled in on a re-run, not only on a fresh download.
+	dl, path, url, requests := downloaderWithArtServer(t)
+
+	added := time.Date(2026, time.May, 27, 18, 32, 39, 0, time.UTC)
+
+	changed, err := dl.RefreshExisting(Request{
+		FileName: "Track - Someone",
+		Tags:     Tags{Title: "Track", Artist: "Someone", CoverArtURL: url},
+		AddedAt:  added,
+	}, true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !changed {
+		t.Error("reported no change")
+	}
+
+	if !hasArt(t, path) {
+		t.Error("no art after refreshing")
+	}
+	if requests.Load() != 1 {
+		t.Errorf("made %d requests, want 1", requests.Load())
+	}
+
+	// Retagging rewrites the file, so the timestamp must still be applied after
+	// the art goes in.
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("file went missing: %v", err)
+	}
+	if !info.ModTime().Equal(added) {
+		t.Errorf("mtime = %v, want %v - embedding art overwrote it", info.ModTime(), added)
 	}
 }

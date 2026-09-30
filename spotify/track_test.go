@@ -298,3 +298,134 @@ func TestDedupeKeepsTheNewestDate(t *testing.T) {
 		t.Errorf("kept the entry added %v, want the newest at %v", tracks[0].AddedAt, at(29))
 	}
 }
+
+func TestGapFrom300(t *testing.T) {
+	tests := []struct {
+		name  string
+		width int
+		want  int
+	}{
+		{name: "exact", width: 300, want: 0},
+		{name: "above", width: 640, want: 340},
+		{name: "below", width: 64, want: 236},
+
+		// The gap ignores direction, so these two are equally good candidates.
+		{name: "50 over", width: 350, want: 50},
+		{name: "50 under", width: 250, want: 50},
+
+		{name: "zero width", width: 0, want: 300},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := gapFrom300(test.width); got != test.want {
+				t.Errorf("gapFrom300(%d) = %d, want %d", test.width, got, test.want)
+			}
+		})
+	}
+}
+
+func TestGetAlbumCoverArtURL(t *testing.T) {
+	// The three sizes Spotify actually returns, widest first.
+	spotifySizes := []Image{
+		{URL: "640px", Width: 640, Height: 640},
+		{URL: "300px", Width: 300, Height: 300},
+		{URL: "64px", Width: 64, Height: 64},
+	}
+
+	tests := []struct {
+		name   string
+		images []Image
+		want   string
+	}{
+		{
+			name:   "picks 300 from Spotify's real three sizes",
+			images: spotifySizes,
+			want:   "300px",
+		},
+		{
+			// Choosing by width rather than by position is the whole point: an
+			// index would grab the 64px thumbnail here.
+			name: "still picks 300 if the order changes",
+			images: []Image{
+				{URL: "640px", Width: 640},
+				{URL: "64px", Width: 64},
+				{URL: "300px", Width: 300},
+			},
+			want: "300px",
+		},
+		{
+			// No art at all is real - local files and delisted tracks have none.
+			// Indexing before checking the length would panic here.
+			name:   "no images returns empty",
+			images: nil,
+			want:   "",
+		},
+		{
+			name:   "a single image is used whatever its size",
+			images: []Image{{URL: "64px", Width: 64}},
+			want:   "64px",
+		},
+		{
+			// Nothing reaches 300, so the largest available wins rather than
+			// nothing being returned.
+			name: "all smaller than 300 takes the largest",
+			images: []Image{
+				{URL: "64px", Width: 64},
+				{URL: "100px", Width: 100},
+			},
+			want: "100px",
+		},
+		{
+			// Everything overshoots, so take the closest one above.
+			name: "all larger than 300 takes the smallest",
+			images: []Image{
+				{URL: "1000px", Width: 1000},
+				{URL: "640px", Width: 640},
+			},
+			want: "640px",
+		},
+		{
+			name:   "exactly 300 beats a near miss",
+			images: []Image{{URL: "301px", Width: 301}, {URL: "300px", Width: 300}},
+			want:   "300px",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			album := Album{Images: test.images}
+			if got := album.GetAlbumCoverArtURL(); got != test.want {
+				t.Errorf("GetAlbumCoverArtURL() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestAlbumDecodesImages(t *testing.T) {
+	// The shape Spotify sends, lifted from a real response.
+	const payload = `{
+		"id": "20yM92448vcBFg4H9BS8tp",
+		"name": "An Album",
+		"images": [
+			{"height": 640, "url": "https://i.scdn.co/image/b273", "width": 640},
+			{"height": 300, "url": "https://i.scdn.co/image/1e02", "width": 300},
+			{"height": 64,  "url": "https://i.scdn.co/image/4851", "width": 64}
+		]
+	}`
+
+	var album Album
+	if err := json.Unmarshal([]byte(payload), &album); err != nil {
+		t.Fatalf("decoding: %v", err)
+	}
+
+	if len(album.Images) != 3 {
+		t.Fatalf("decoded %d images, want 3 - are the struct fields exported?", len(album.Images))
+	}
+	if album.Images[1].Width != 300 {
+		t.Errorf("second image width = %d, want 300", album.Images[1].Width)
+	}
+	if got := album.GetAlbumCoverArtURL(); got != "https://i.scdn.co/image/1e02" {
+		t.Errorf("GetAlbumCoverArtURL() = %q, want the 300px URL", got)
+	}
+}
