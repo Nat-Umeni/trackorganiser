@@ -298,9 +298,10 @@ func buildRequest(track spotify.Track) downloader.Request {
 		Query:    track.BuildSearchQuery(),
 		FileName: track.FileName(),
 		Tags: downloader.Tags{
-			Artist: track.JoinArtistNames(),
-			Title:  track.Name,
-			Album:  track.Album.Name,
+			Artist:      track.JoinArtistNames(),
+			Title:       track.Name,
+			Album:       track.Album.Name,
+			CoverArtURL: track.Album.GetAlbumCoverArtURL(),
 		},
 		DurationMS: track.DurationMS,
 		AddedAt:    track.AddedAt,

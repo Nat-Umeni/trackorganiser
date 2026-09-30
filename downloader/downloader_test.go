@@ -599,7 +599,7 @@ func TestRefreshExistingLeavesTagsAloneWithoutTheFlag(t *testing.T) {
 	dl, path := downloaderWithExisting(t, "Track - Someone.mp3")
 
 	// Tag it with one thing, then refresh with different tags and retag off.
-	if err := addTagsToFile(path, Tags{Title: "Original Title"}); err != nil {
+	if err := dl.addTagsToFile(path, Tags{Title: "Original Title"}); err != nil {
 		t.Fatalf("setting up: %v", err)
 	}
 

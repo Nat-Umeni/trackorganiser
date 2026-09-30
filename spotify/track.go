@@ -17,9 +17,41 @@ type Artist struct {
 }
 
 type Album struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-	Href string `json:"href"`
+	ID     string  `json:"id"`
+	Name   string  `json:"name"`
+	Href   string  `json:"href"`
+	Images []Image `json:"images"`
+}
+
+func (a Album) GetAlbumCoverArtURL() string {
+	if len(a.Images) == 0 {
+		return ""
+	}
+
+	best := a.Images[0]
+
+	for _, currentAlbum := range a.Images[1:] {
+		if gapFrom300(currentAlbum.Width) < gapFrom300(best.Width) {
+			best = currentAlbum
+		}
+	}
+
+	return best.URL
+}
+
+func gapFrom300(widthAmount int) int {
+	gap := widthAmount - 300
+	if gap < 0 {
+		gap = -gap
+	}
+
+	return gap
+}
+
+type Image struct {
+	URL    string `json:"url"`
+	Height int    `json:"height"`
+	Width  int    `json:"width"`
 }
 
 type Track struct {

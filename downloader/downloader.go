@@ -56,12 +56,14 @@ type AudioDownloader struct {
 	// tracks.
 	jsRuntime  string
 	useCookies bool
+	cache      *coverArtCache
 }
 
 type Tags struct {
-	Title  string
-	Artist string
-	Album  string
+	Title       string
+	Artist      string
+	Album       string
+	CoverArtURL string
 }
 
 // Request is everything needed to fetch and label one track. It is a struct
@@ -124,6 +126,7 @@ func NewAudioDownloader(outputDir string, ytdlpPath string) (*AudioDownloader, e
 		existing:   findExistingTracks(outputDir),
 		jsRuntime:  FindJSRuntime(),
 		useCookies: FirefoxCookiesAvailable(home),
+		cache:      newCoverArtCache(),
 	}, nil
 }
 
@@ -232,7 +235,7 @@ func (d *AudioDownloader) RefreshExisting(req Request, retag bool) (bool, error)
 	// Retagging first, always. It rewrites the whole file, so a timestamp set
 	// before it would be thrown away.
 	if retag {
-		if err := addTagsToFile(path, req.Tags); err != nil {
+		if err := d.addTagsToFile(path, req.Tags); err != nil {
 			return false, err
 		}
 		changed = true
@@ -291,7 +294,7 @@ func (d *AudioDownloader) DownloadBestAudio(req Request) error {
 		return fmt.Errorf("no YouTube results for %q", req.Query)
 	}
 
-	if err := addTagsToFile(downloadedPath, req.Tags); err != nil {
+	if err := d.addTagsToFile(downloadedPath, req.Tags); err != nil {
 		return err
 	}
 
@@ -333,7 +336,7 @@ func (d *AudioDownloader) DownloadBestAudio(req Request) error {
 	return nil
 }
 
-func addTagsToFile(path string, tags Tags) error {
+func (d *AudioDownloader) addTagsToFile(path string, tags Tags) error {
 	tag, err := id3v2.Open(path, id3v2.Options{Parse: true})
 	if err != nil {
 		return fmt.Errorf("Error while opening mp3 file %q: %w ", tags.Title, err)
@@ -343,6 +346,19 @@ func addTagsToFile(path string, tags Tags) error {
 	tag.SetAlbum(tags.Album)
 	tag.SetArtist(tags.Artist)
 	tag.SetTitle(tags.Title)
+
+	alreadyHasArt := len(tag.GetFrames(tag.CommonID("Attached picture"))) > 0
+	if tags.CoverArtURL != "" && !alreadyHasArt {
+		rawIMGData, err := d.cache.lookUp(tags.CoverArtURL)
+		if err == nil {
+			tag.AddAttachedPicture(id3v2.PictureFrame{
+				Encoding:    id3v2.EncodingUTF8,
+				MimeType:    "image/jpeg",
+				PictureType: id3v2.PTFrontCover,
+				Picture:     rawIMGData,
+			})
+		}
+	}
 
 	if err = tag.Save(); err != nil {
 		return fmt.Errorf("tagging %q: %w", tags.Title, err)
