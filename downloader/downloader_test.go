@@ -2,11 +2,15 @@ package downloader
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/bogem/id3v2/v2"
 )
 
 // writeFiles creates each named file, making parent directories as needed, so a
@@ -81,12 +85,23 @@ func TestFindExistingTracks(t *testing.T) {
 					len(existing), existing, len(test.want), test.want)
 			}
 			for _, key := range test.want {
-				if !existing[key] {
+				path, found := existing[key]
+				if !found {
 					t.Errorf("expected %q to be found, got %v", key, existing)
+					continue
+				}
+				// The path is the point of storing more than a bool: it is what
+				// lets an already-downloaded track be corrected where it
+				// actually sits, which may be a genre subfolder.
+				if filepath.Base(strings.ToLower(path)) != key {
+					t.Errorf("%q maps to %q, which is a different file", key, path)
+				}
+				if !filepath.IsAbs(path) && !strings.HasPrefix(path, root) {
+					t.Errorf("%q maps to %q, which is not under the scanned root", key, path)
 				}
 			}
 			for _, key := range test.wantNot {
-				if existing[key] {
+				if existing[key] != "" {
 					t.Errorf("did not expect %q to be found", key)
 				}
 			}
@@ -318,5 +333,334 @@ func TestYtdlpArgs(t *testing.T) {
 				t.Errorf("args %q missing the output template", joined)
 			}
 		})
+	}
+}
+
+// fakeYtdlp writes a stand-in for yt-dlp that exits 0 without downloading, the
+// way the real one behaves when a search finds nothing.
+func fakeYtdlp(t *testing.T) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "yt-dlp-stub")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatalf("setting up: %v", err)
+	}
+
+	return path
+}
+
+// silentTrack generates two seconds of real audio with ffmpeg, which is already a
+// hard dependency. Real audio is needed because tagging and ffprobe both run over
+// it - arbitrary bytes would fail before the timestamp is ever applied.
+func silentTrack(t *testing.T) []byte {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "silence.mp3")
+	cmd := exec.Command("ffmpeg", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono", "-t", "2", "-y", path)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Skipf("ffmpeg could not generate test audio: %v\n%s", err, output)
+	}
+
+	audio, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("setting up: %v", err)
+	}
+
+	return audio
+}
+
+// downloaderWithPlacedFile builds a downloader whose yt-dlp stand-in writes
+// nothing, with real audio already sitting where the download would land. That
+// gets DownloadBestAudio past its os.Stat check and through tagging, which is
+// where the timestamp is applied.
+func downloaderWithPlacedFile(t *testing.T, fileName string) (*AudioDownloader, string) {
+	t.Helper()
+
+	if runtime.GOOS == "windows" {
+		t.Skip("the yt-dlp stand-in relies on a shell script")
+	}
+
+	outputDir := t.TempDir()
+	path := filepath.Join(outputDir, fileName+".mp3")
+	if err := os.WriteFile(path, silentTrack(t), 0644); err != nil {
+		t.Fatalf("setting up: %v", err)
+	}
+
+	return &AudioDownloader{OutputDir: outputDir, YtdlpPath: fakeYtdlp(t)}, path
+}
+
+func TestDownloadBestAudioStampsTheAddedDate(t *testing.T) {
+	dl, path := downloaderWithPlacedFile(t, "Some Track - Someone")
+
+	// Well in the past, so it cannot be confused with the file being written now.
+	added := time.Date(2026, time.March, 14, 9, 26, 53, 0, time.UTC)
+
+	// The duration is left at zero so the length check passes and the timestamp
+	// is what the test is actually about.
+	_ = dl.DownloadBestAudio(Request{
+		Query:    "Some Track Someone topic",
+		FileName: "Some Track - Someone",
+		Tags:     Tags{Title: "Some Track"},
+		AddedAt:  added,
+	})
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("file went missing: %v", err)
+	}
+	if !info.ModTime().Equal(added) {
+		t.Errorf("mtime = %v, want %v", info.ModTime(), added)
+	}
+}
+
+func TestDownloadBestAudioLeavesMtimeAloneWithoutADate(t *testing.T) {
+	dl, path := downloaderWithPlacedFile(t, "Some Track - Someone")
+
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("setting up: %v", err)
+	}
+
+	// No AddedAt. Stamping the zero time would date the file to year 1, which is
+	// worse than leaving it at whatever it already was.
+	_ = dl.DownloadBestAudio(Request{
+		Query:    "Some Track Someone topic",
+		FileName: "Some Track - Someone",
+		Tags:     Tags{Title: "Some Track"},
+	})
+
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("file went missing: %v", err)
+	}
+	if after.ModTime().Year() < 1900 {
+		t.Errorf("mtime = %v, which means the zero time was stamped", after.ModTime())
+	}
+	if after.ModTime().Before(before.ModTime()) {
+		t.Errorf("mtime went backwards: %v then %v", before.ModTime(), after.ModTime())
+	}
+}
+
+func TestDownloadBestAudioStampsAfterTagging(t *testing.T) {
+	// Tagging rewrites the file, so a timestamp applied before it would be
+	// undone. This is the ordering test for that.
+	dl, path := downloaderWithPlacedFile(t, "Tagged Track - Someone")
+
+	added := time.Date(2025, time.December, 25, 0, 0, 0, 0, time.UTC)
+
+	_ = dl.DownloadBestAudio(Request{
+		Query:    "Tagged Track Someone topic",
+		FileName: "Tagged Track - Someone",
+		Tags:     Tags{Title: "Tagged Track", Artist: "Someone", Album: "An Album"},
+		AddedAt:  added,
+	})
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("file went missing: %v", err)
+	}
+	if !info.ModTime().Equal(added) {
+		t.Errorf("mtime = %v, want %v - tagging probably ran last and overwrote it",
+			info.ModTime(), added)
+	}
+}
+
+// downloaderWithExisting places real audio under root, optionally in a
+// subfolder, and returns a downloader that has scanned it.
+func downloaderWithExisting(t *testing.T, relativePath string) (*AudioDownloader, string) {
+	t.Helper()
+
+	root := t.TempDir()
+	path := filepath.Join(root, relativePath)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatalf("setting up: %v", err)
+	}
+	if err := os.WriteFile(path, silentTrack(t), 0644); err != nil {
+		t.Fatalf("setting up: %v", err)
+	}
+
+	dl, err := NewAudioDownloader(root, "yt-dlp")
+	if err != nil {
+		t.Skipf("downloader unavailable on this machine: %v", err)
+	}
+
+	return dl, path
+}
+
+func TestPathOf(t *testing.T) {
+	dl, path := downloaderWithExisting(t, filepath.Join("Hip Hop", "WITNESS - Logic.mp3"))
+
+	tests := []struct {
+		name     string
+		fileName string
+		want     string
+	}{
+		// The whole reason the scan stores paths: OutputDir alone cannot tell
+		// you a track was filed into a genre folder by hand.
+		{name: "track in a subfolder", fileName: "WITNESS - Logic", want: path},
+		{name: "case insensitive", fileName: "witness - LOGIC", want: path},
+		{name: "track we do not have", fileName: "Nothing", want: ""},
+		{name: "empty name", fileName: "", want: ""},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := dl.PathOf(test.fileName); got != test.want {
+				t.Errorf("PathOf(%q) = %q, want %q", test.fileName, got, test.want)
+			}
+		})
+	}
+}
+
+func TestRefreshExistingStampsInPlace(t *testing.T) {
+	// In a subfolder specifically, because that is the case a path derived from
+	// OutputDir would get wrong.
+	dl, path := downloaderWithExisting(t, filepath.Join("Hip Hop", "WITNESS - Logic.mp3"))
+
+	added := time.Date(2026, time.May, 27, 18, 32, 39, 0, time.UTC)
+
+	changed, err := dl.RefreshExisting(Request{FileName: "WITNESS - Logic", AddedAt: added}, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !changed {
+		t.Error("reported no change, but the timestamp was wrong")
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("file went missing: %v", err)
+	}
+	if !info.ModTime().Equal(added) {
+		t.Errorf("mtime = %v, want %v", info.ModTime(), added)
+	}
+}
+
+func TestRefreshExistingIsIdempotent(t *testing.T) {
+	// Without this, every re-run would rewrite every inode and a backup tool
+	// would see the whole library as changed.
+	dl, path := downloaderWithExisting(t, "Track - Someone.mp3")
+
+	added := time.Date(2026, time.May, 27, 18, 32, 39, 0, time.UTC)
+	req := Request{FileName: "Track - Someone", AddedAt: added}
+
+	if changed, err := dl.RefreshExisting(req, false); err != nil || !changed {
+		t.Fatalf("first refresh: changed=%v err=%v, want true and no error", changed, err)
+	}
+
+	changed, err := dl.RefreshExisting(req, false)
+	if err != nil {
+		t.Fatalf("second refresh: %v", err)
+	}
+	if changed {
+		t.Error("second refresh reported a change, but the timestamp was already correct")
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("file went missing: %v", err)
+	}
+	if !info.ModTime().Equal(added) {
+		t.Errorf("mtime drifted to %v, want %v", info.ModTime(), added)
+	}
+}
+
+func TestRefreshExistingRetagsThenStamps(t *testing.T) {
+	// Retagging rewrites the whole file, so a timestamp applied before it would
+	// be thrown away. This is the ordering test, and the reason both live in one
+	// method rather than being left to the caller to sequence.
+	dl, path := downloaderWithExisting(t, "Track - Someone.mp3")
+
+	added := time.Date(2026, time.May, 27, 18, 32, 39, 0, time.UTC)
+
+	changed, err := dl.RefreshExisting(Request{
+		FileName: "Track - Someone",
+		Tags:     Tags{Title: "Track", Artist: "Someone", Album: "An Album"},
+		AddedAt:  added,
+	}, true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !changed {
+		t.Error("reported no change after retagging")
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("file went missing: %v", err)
+	}
+	if !info.ModTime().Equal(added) {
+		t.Errorf("mtime = %v, want %v - retagging probably ran last and overwrote it",
+			info.ModTime(), added)
+	}
+}
+
+func TestRefreshExistingLeavesTagsAloneWithoutTheFlag(t *testing.T) {
+	dl, path := downloaderWithExisting(t, "Track - Someone.mp3")
+
+	// Tag it with one thing, then refresh with different tags and retag off.
+	if err := addTagsToFile(path, Tags{Title: "Original Title"}); err != nil {
+		t.Fatalf("setting up: %v", err)
+	}
+
+	_, err := dl.RefreshExisting(Request{
+		FileName: "Track - Someone",
+		Tags:     Tags{Title: "Replacement Title"},
+		AddedAt:  time.Date(2026, time.May, 27, 18, 32, 39, 0, time.UTC),
+	}, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	tag, err := id3v2.Open(path, id3v2.Options{Parse: true})
+	if err != nil {
+		t.Fatalf("reading tags back: %v", err)
+	}
+	defer tag.Close()
+
+	if got := tag.Title(); got != "Original Title" {
+		t.Errorf("title = %q, want it untouched without -retag-existing", got)
+	}
+}
+
+func TestRefreshExistingOnATrackWeDoNotHave(t *testing.T) {
+	dl, _ := downloaderWithExisting(t, "Track - Someone.mp3")
+
+	changed, err := dl.RefreshExisting(Request{
+		FileName: "Something Else - Nobody",
+		AddedAt:  time.Now(),
+	}, true)
+
+	if err != nil {
+		t.Errorf("unexpected error for a track we don't have: %v", err)
+	}
+	if changed {
+		t.Error("reported a change for a track that isn't on disk")
+	}
+}
+
+func TestRefreshExistingWithoutADate(t *testing.T) {
+	// A track Spotify gave no timestamp for must not be stamped to year 1.
+	dl, path := downloaderWithExisting(t, "Track - Someone.mp3")
+
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("setting up: %v", err)
+	}
+
+	changed, err := dl.RefreshExisting(Request{FileName: "Track - Someone"}, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if changed {
+		t.Error("reported a change with nothing to change")
+	}
+
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("file went missing: %v", err)
+	}
+	if !after.ModTime().Equal(before.ModTime()) {
+		t.Errorf("mtime moved from %v to %v", before.ModTime(), after.ModTime())
 	}
 }

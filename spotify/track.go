@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
+	"time"
 )
 
 type Artist struct {
@@ -26,6 +28,13 @@ type Track struct {
 	Artists    []Artist `json:"artists"`
 	Album      Album    `json:"album"`
 	DurationMS int      `json:"duration_ms"`
+
+	// AddedAt is when the track joined the playlist. Spotify puts it on the
+	// wrapper rather than the song - one song added to two playlists has two
+	// different values - so it never decodes into here directly.
+	// FetchPlaylistTracks copies it across when it unwraps, because carrying it
+	// on Track is far easier to work with than passing the wrapper around.
+	AddedAt time.Time
 }
 
 func (t Track) JoinArtistNames() string {
@@ -70,8 +79,9 @@ func (t Track) FileName() string {
 }
 
 type PlaylistTrackItem struct {
-	IsLocal bool  `json:"is_local"`
-	Item    Track `json:"item"`
+	IsLocal bool      `json:"is_local"`
+	Item    Track     `json:"item"`
+	AddedAt time.Time `json:"added_at"`
 }
 
 type playlistTracksResponse struct {
@@ -120,12 +130,61 @@ func (c *Client) FetchPlaylistTracks(playlist Playlist) ([]Track, error) {
 			if playlistTrackItem.IsLocal || playlistTrackItem.Item.Name == "" {
 				continue
 			}
-			allTracks = append(allTracks, playlistTrackItem.Item)
+
+			// Item is a value, so this is a copy - the response struct is left
+			// alone.
+			track := playlistTrackItem.Item
+			track.AddedAt = playlistTrackItem.AddedAt
+			allTracks = append(allTracks, track)
 		}
 
 		nextUrl = playlistTracksResponse.Next
 
 	}
 
-	return allTracks, nil
+	// After the loop, not inside it, or each page would be sorted on its own.
+	sort.Slice(allTracks, func(i, j int) bool {
+		return addedAfter(allTracks[i], allTracks[j])
+	})
+
+	return dedupeByFileName(allTracks), nil
+}
+
+// dedupeByFileName drops later entries that would land on the same file as an
+// earlier one, keeping the first - which, after sorting, is the most recently
+// added.
+//
+// A track really can appear twice in one playlist with two different added_at
+// values, and both map to a single filename. Left in, the pair fights over that
+// file's timestamp on every run, and with several downloads in flight both
+// could be fetched to the same path at once.
+func dedupeByFileName(tracks []Track) []Track {
+	seen := make(map[string]bool, len(tracks))
+	deduped := make([]Track, 0, len(tracks))
+
+	for _, track := range tracks {
+		// Lowercased to match how the downloader recognises existing files:
+		// macOS and Windows treat two casings as one file.
+		key := strings.ToLower(track.FileName())
+		if seen[key] {
+			continue
+		}
+
+		seen[key] = true
+		deduped = append(deduped, track)
+	}
+
+	return deduped
+}
+
+// addedAfter reports whether a joined the playlist more recently than b, which
+// is the "date added, newest first" order Spotify shows by default.
+//
+// It is a named function rather than an inline closure so it can be tested:
+// FetchPlaylistTracks itself cannot be, while callSpotify hardcodes the API base
+// URL.
+func addedAfter(a, b Track) bool {
+	// A track with no timestamp sorts last rather than winning by accident -
+	// the zero time predates everything.
+	return a.AddedAt.After(b.AddedAt)
 }

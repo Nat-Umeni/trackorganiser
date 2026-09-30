@@ -44,10 +44,12 @@ type AudioDownloader struct {
 	OutputDir string
 	YtdlpPath string
 
-	// existing holds the lowercased base names of every mp3 already under
-	// OutputDir, at any depth. Playlist folders get genre subfolders made by
-	// hand, so a track that has been filed away must still count as downloaded.
-	existing map[string]bool
+	// existing maps the lowercased base name of every mp3 already under
+	// OutputDir to its full path, at any depth. Playlist folders get genre
+	// subfolders made by hand, so a track that has been filed away must still
+	// count as downloaded - and the path is what lets it be corrected in place
+	// rather than only recognised.
+	existing map[string]string
 
 	// Both probed once at construction. Empty and false respectively are valid -
 	// yt-dlp runs without either, just with fewer formats and no age-gated
@@ -70,6 +72,12 @@ type Request struct {
 	FileName   string
 	Tags       Tags
 	DurationMS int
+
+	// AddedAt is when the track joined the Spotify playlist. It becomes the
+	// file's modification time, which is the only place a folder can carry the
+	// playlist's order - filenames sort alphabetically and a directory has no
+	// inherent order of its own.
+	AddedAt time.Time
 }
 
 // ffmpegInstallHint names the command that installs ffmpeg on the given
@@ -169,8 +177,8 @@ func ytdlpArgs(outputPath, query, jsRuntime, titlePath string, useCookies bool) 
 // Errors are swallowed deliberately: a directory that cannot be read means
 // "assume nothing is here", which costs a re-download. Failing the whole run
 // because one subfolder was unreadable would be a far worse trade.
-func findExistingTracks(root string) map[string]bool {
-	existing := make(map[string]bool)
+func findExistingTracks(root string) map[string]string {
+	existing := make(map[string]string)
 
 	filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil || entry.IsDir() {
@@ -178,7 +186,7 @@ func findExistingTracks(root string) map[string]bool {
 		}
 
 		if strings.EqualFold(filepath.Ext(path), ".mp3") {
-			existing[strings.ToLower(filepath.Base(path))] = true
+			existing[strings.ToLower(filepath.Base(path))] = path
 		}
 
 		return nil
@@ -191,7 +199,65 @@ func findExistingTracks(root string) map[string]bool {
 // It takes the bare name as spotify.Track.FileName returns it and adds the
 // extension itself, so callers never need to know the output format.
 func (d *AudioDownloader) Has(fileName string) bool {
+	return d.PathOf(fileName) != ""
+}
+
+// PathOf returns where an already-downloaded track actually lives, which is not
+// derivable from OutputDir - it may have been filed into a genre subfolder by
+// hand. Empty if we don't have it.
+func (d *AudioDownloader) PathOf(fileName string) string {
 	return d.existing[strings.ToLower(fileName+".mp3")]
+}
+
+// RefreshExisting brings a track we already have back in line with Spotify,
+// without re-downloading it. Returns whether anything actually changed.
+//
+// The order is deliberate and is why this is one method rather than two:
+// retagging rewrites the whole file, so a timestamp set before it would be
+// thrown away.
+//
+// Tags are only rewritten when asked, because that rewrite costs the file's
+// whole size in I/O. The timestamp is always corrected, because it is an inode
+// update and effectively free - but only when it is actually wrong, so a second
+// run over an already-correct library touches nothing and backup tools have no
+// reason to re-transfer gigabytes.
+func (d *AudioDownloader) RefreshExisting(req Request, retag bool) (bool, error) {
+	path := d.PathOf(req.FileName)
+	if path == "" {
+		return false, nil
+	}
+
+	changed := false
+
+	// Retagging first, always. It rewrites the whole file, so a timestamp set
+	// before it would be thrown away.
+	if retag {
+		if err := addTagsToFile(path, req.Tags); err != nil {
+			return false, err
+		}
+		changed = true
+	}
+
+	if req.AddedAt.IsZero() {
+		return changed, nil
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		return changed, fmt.Errorf("checking %s: %w", filepath.Base(path), err)
+	}
+
+	// Already correct, so touch nothing - that is what keeps a second run over
+	// an unchanged library free.
+	if info.ModTime().Equal(req.AddedAt) {
+		return changed, nil
+	}
+
+	if err := os.Chtimes(path, req.AddedAt, req.AddedAt); err != nil {
+		return changed, fmt.Errorf("stamping %s: %w", filepath.Base(path), err)
+	}
+
+	return true, nil
 }
 
 func (d *AudioDownloader) DownloadBestAudio(req Request) error {
@@ -227,6 +293,15 @@ func (d *AudioDownloader) DownloadBestAudio(req Request) error {
 
 	if err := addTagsToFile(downloadedPath, req.Tags); err != nil {
 		return err
+	}
+
+	// Stamped after tagging, because tagging rewrites the file and would undo
+	// it. The error is ignored on purpose: a wrong timestamp is cosmetic, and
+	// failing a download that otherwise worked over it would be absurd. A zero
+	// time means nothing supplied one, and stamping that would date the file to
+	// year 1.
+	if !req.AddedAt.IsZero() {
+		os.Chtimes(downloadedPath, req.AddedAt, req.AddedAt)
 	}
 
 	// Checked before the duration, because it is the more meaningful signal: a

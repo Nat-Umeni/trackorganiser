@@ -40,8 +40,10 @@ var stdin = bufio.NewScanner(os.Stdin)
 func main() {
 	var jobs int
 	var dryRun bool
+	var noRetag bool
 	flag.IntVar(&jobs, "jobs", 4, "how many tracks to download at once (1-16) - higher risks rate limiting")
 	flag.BoolVar(&dryRun, "dry-run", false, "list the filename each track would get without downloading anything")
+	flag.BoolVar(&noRetag, "no-retag", false, "skip rewriting ID3 tags on tracks already downloaded (much faster: retagging costs each file's full size in I/O)")
 	flag.Parse()
 	jobs = clampJobs(jobs)
 
@@ -150,6 +152,7 @@ func main() {
 	// is lost among hundreds of tracks; a short list afterwards is actionable.
 	var mismatches []string
 	skipped := 0
+	refreshed := 0
 
 	for playlistName, playlistTracks := range tracksByPlaylist {
 		playlistPath := filepath.Join(downloadPath, playlistName)
@@ -167,6 +170,20 @@ func main() {
 			// subfolder by hand still counts as downloaded.
 			if dl.Has(track.FileName()) {
 				skipped++
+
+				// Already on disk, but its timestamp may predate this being
+				// recorded at all, and its tags may be stale. Correcting in
+				// place costs no download - and without this, a library only
+				// comes into line one deleted file at a time.
+				if !dryRun {
+					changed, err := dl.RefreshExisting(buildRequest(track), !noRetag)
+					if err != nil {
+						fmt.Printf("Couldn't refresh %s: %v\n", track.FileName(), err)
+					} else if changed {
+						refreshed++
+					}
+				}
+
 				continue
 			}
 
@@ -183,6 +200,10 @@ func main() {
 
 	if skipped > 0 {
 		fmt.Printf("\nSkipped %d track(s) already downloaded.\n", skipped)
+	}
+
+	if refreshed > 0 {
+		fmt.Printf("Corrected %d existing track(s) in place.\n", refreshed)
 	}
 
 	if len(mismatches) > 0 {
@@ -282,6 +303,7 @@ func buildRequest(track spotify.Track) downloader.Request {
 			Album:  track.Album.Name,
 		},
 		DurationMS: track.DurationMS,
+		AddedAt:    track.AddedAt,
 	}
 }
 
