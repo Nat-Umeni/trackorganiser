@@ -1,0 +1,56 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # From go.mod, not "latest", so CI can't pass on a toolchain we don't
+          # declare.
+          go-version-file: go.mod
+
+      # Not optional - the tests shell out to ffmpeg, and without it they skip
+      # rather than fail, so the suite would go green running a fraction of
+      # itself.
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - run: go build ./...
+      - run: go vet ./...
+
+      # -race is the gate, not an extra - it is the only thing that catches a
+      # missing mutex. pipefail matters: without it the pipe returns tee's exit
+      # code and a failing suite would report green.
+      - name: go test -race
+        run: |
+          set -o pipefail
+          go test -race -v ./... 2>&1 | tee /tmp/test.log
+
+      # Counts from the run above rather than running everything again. Catches
+      # the suite silently shrinking if a dependency goes missing and tests
+      # start skipping instead of running.
+      - name: Check the suite actually ran
+        run: |
+          passed=$(grep -c '^\s*--- PASS' /tmp/test.log || true)
+          echo "subtests passed: $passed"
+          if [ "$passed" -lt 250 ]; then
+            echo "Expected 250+. Something is skipping - check ffmpeg."
+            exit 1
+          fi

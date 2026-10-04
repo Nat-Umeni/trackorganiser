@@ -1,0 +1,49 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+# gh release create needs this to create the release and upload the binaries.
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # build.sh calls `git describe`, which needs the tags.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      # The gates run before anything is published, so a broken build cannot
+      # ship. This is the whole reason releasing is a workflow rather than a
+      # local `gh release create`.
+      - name: Gates
+        run: |
+          test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+          go build ./...
+          go vet ./...
+          go test -race ./...
+
+      - name: Build every platform
+        run: ./build.sh "${GITHUB_REF_NAME}"
+
+      # gh is pre-installed on GitHub's runners and GITHUB_TOKEN is provided
+      # automatically, so this needs no third-party action running with write
+      # access to the repo.
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes

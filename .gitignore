@@ -2,3 +2,5 @@
 spotify_token.json
 .claude
 CLAUDE.md
+# Built binaries - these go on GitHub Releases, not in git history
+dist/
