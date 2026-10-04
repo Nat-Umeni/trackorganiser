@@ -7,4 +7,7 @@ require (
 	github.com/joho/godotenv v1.5.1
 )
 
-require golang.org/x/text v0.3.8 // indirect
+require (
+	github.com/ulikunitz/xz v0.5.17 // indirect
+	golang.org/x/text v0.3.8 // indirect
+)

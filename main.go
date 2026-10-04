@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -154,6 +155,8 @@ func main() {
 	if err != nil {
 		log.Fatal("failed to find ytdlp for an unknown reason: ", err)
 	}
+
+	ensureFfmpeg()
 
 	reportYtdlpExtras()
 
@@ -502,6 +505,48 @@ func ensureOutputLocationExists(downloadPath string) (string, error) {
 	}
 
 	return safeDownloadPath, nil
+}
+
+// ensureFfmpeg makes ffmpeg and ffprobe runnable, offering to download them the
+// way yt-dlp is offered.
+//
+// It has to run before NewAudioDownloader, which is what checks for both and
+// refuses to start without them.
+//
+// Nothing here is fatal. A declined or failed download leaves that check to
+// report the problem with the install command for the platform, which is the
+// right message anyway - and on macOS there is no download to offer at all.
+func ensureFfmpeg() {
+	dir, err := downloader.FindFfmpeg()
+
+	if errors.Is(err, downloader.ErrFfmpegMissing) {
+		answer, readErr := readLine(fmt.Sprintf(
+			"ffmpeg isn't installed, download it? It's %s. [Y/n]",
+			downloader.FfmpegDownloadSize(runtime.GOOS)))
+		if readErr != nil {
+			fmt.Printf("Couldn't read your answer, carrying on without it: %v\n", readErr)
+			return
+		}
+
+		if strings.EqualFold(answer, "n") || strings.EqualFold(answer, "no") {
+			return
+		}
+
+		fmt.Println("Downloading ffmpeg, this takes a minute...")
+		dir, err = downloader.InstallFfmpeg()
+		if err != nil {
+			fmt.Printf("Couldn't install ffmpeg: %v\n", err)
+			return
+		}
+
+		fmt.Println("ffmpeg installed.")
+	} else if err != nil {
+		fmt.Printf("Couldn't check for ffmpeg: %v\n", err)
+		return
+	}
+
+	// Empty when ffmpeg was already on PATH, and AddToPath ignores that.
+	downloader.AddToPath(dir)
 }
 
 // reportYtdlpExtras says what optional yt-dlp support was found, so a run that
