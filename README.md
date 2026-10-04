@@ -27,10 +27,25 @@ need Go, or anything else installed to run it.
 | Mac (M1 and later) | `trackorganiser-macos-arm64` |
 | Linux | `trackorganiser-linux-amd64` |
 
-**Rename it to `trackorganiser.exe`** (or `trackorganiser` on Mac and Linux).
-Every command below assumes that, and it saves typing the platform out each time.
+**Make sure you grabbed the right one.** They are not interchangeable - the
+Windows `.exe` will not run on Linux or Mac, and the error is an unhelpful "no
+such file or directory". If in doubt:
 
-On Mac and Linux you also need to allow it to run once:
+```
+file trackorganiser-*
+```
+
+`ELF` means Linux, `Mach-O` means Mac, `PE32+` means Windows.
+
+**Then rename it**, dropping the platform but keeping any `.exe`:
+
+| | rename to |
+|---|---|
+| Windows | `trackorganiser.exe` |
+| Mac and Linux | `trackorganiser` (no extension) |
+
+Every command below assumes you did. On Mac and Linux you also need to allow it
+to run:
 
 ```
 chmod +x trackorganiser
@@ -52,12 +67,17 @@ here", or type `cmd` into the address bar.
 
 Whoever sent you this program has a Spotify client ID. Ask them for it, then:
 
+**Windows** (PowerShell needs the `.\`):
+
 ```
 .\trackorganiser.exe -client-id THE-ID-THEY-GAVE-YOU
 ```
 
-The `.\` is needed in PowerShell. On Mac and Linux it's `./trackorganiser`
-instead.
+**Mac and Linux** (note the forward slash):
+
+```
+./trackorganiser -client-id THE-ID-THEY-GAVE-YOU
+```
 
 That only needs doing once. It's saved in your user config directory and picked
 up automatically from then on.
@@ -109,7 +129,8 @@ Downloads run four at a time by default. If your connection can take it, turn it
 up:
 
 ```
-.\trackorganiser.exe -jobs 16
+.\trackorganiser.exe -jobs 16      # Windows
+./trackorganiser -jobs 16          # Mac and Linux
 ```
 
 16 is the maximum. On a reasonable machine that's roughly seven times quicker
