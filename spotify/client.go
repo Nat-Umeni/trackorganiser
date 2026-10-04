@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -27,7 +28,21 @@ type Client struct {
 	expiry            time.Time
 }
 
-const tokenCacheFile = "spotify_token.json"
+// tokenCacheFileName lives in ConfigDir, not the working directory. As a bare
+// relative path it meant re-authenticating whenever the program ran from
+// somewhere else, and a double-clicked exe would try to write it wherever the
+// file manager happened to point.
+const tokenCacheFileName = "spotify_token.json"
+
+// tokenCachePath resolves where the refresh token is kept.
+func tokenCachePath() (string, error) {
+	dir, err := ConfigDir()
+	if err != nil {
+		return "", err
+	}
+
+	return filepath.Join(dir, tokenCacheFileName), nil
+}
 
 type tokenCache struct {
 	RefreshToken string `json:"refresh_token"`
@@ -140,7 +155,12 @@ func (c *Client) ensureToken() error {
 
 // loadToken reads the refresh token from disk.
 func (c *Client) loadToken() error {
-	data, err := os.ReadFile(tokenCacheFile)
+	path, err := tokenCachePath()
+	if err != nil {
+		return err
+	}
+
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
@@ -154,12 +174,17 @@ func (c *Client) loadToken() error {
 
 // saveToken writes the refresh token to disk.
 func (c *Client) saveToken(token string) error {
+	path, err := tokenCachePath()
+	if err != nil {
+		return err
+	}
+
 	cache := tokenCache{RefreshToken: token}
 	data, err := json.Marshal(cache)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(tokenCacheFile, data, 0600)
+	return os.WriteFile(path, data, 0600)
 }
 
 func (c *Client) callSpotify(method string, endpoint string, body interface{}) (*http.Response, error) {
@@ -197,5 +222,12 @@ func (c *Client) callSpotify(method string, endpoint string, body interface{}) (
 }
 
 func (c *Client) deleteTokenCache() {
-	os.Remove(tokenCacheFile)
+	// A path we cannot resolve means there is nothing to delete, which is the
+	// outcome this function wants anyway.
+	path, err := tokenCachePath()
+	if err != nil {
+		return
+	}
+
+	os.Remove(path)
 }
