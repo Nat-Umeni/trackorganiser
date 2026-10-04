@@ -48,7 +48,7 @@ func exchangeCodeForTokens(clientID, code, verifier string) (accessToken, refres
 	data.Set("client_id", clientID)
 	data.Set("grant_type", "authorization_code")
 	data.Set("code", code)
-	data.Set("redirect_uri", "http://127.0.0.1:8080/callback")
+	data.Set("redirect_uri", redirectURI())
 	data.Set("code_verifier", verifier)
 
 	resp, err := http.PostForm("https://accounts.spotify.com/api/token", data)

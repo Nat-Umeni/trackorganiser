@@ -22,6 +22,22 @@ var randomReader io.Reader = rand.Reader
 // test.
 var spotifyAuthorizeURL = "https://accounts.spotify.com/authorize"
 
+// CallbackPort is exported so a flag can move it off 8080. Spotify only accepts
+// redirect URIs registered against the app, so changing it needs a dashboard
+// entry to match.
+var CallbackPort = 8080
+
+// The loopback IP, not "localhost" - Spotify requires the literal address.
+func callbackAddress() string {
+	return fmt.Sprintf("127.0.0.1:%d", CallbackPort)
+}
+
+// The authorize request, the token exchange and the listener all have to agree
+// on this, so they share it.
+func redirectURI() string {
+	return "http://" + callbackAddress() + "/callback"
+}
+
 // generateCodeVerifier creates a high‑entropy random string for PKCE.
 func generateCodeVerifier() (string, error) {
 	const length = 64
@@ -79,7 +95,7 @@ func initiateSpotifyAuth(clientID string) (code, codeVerifier, state string, err
 	query := authURL.Query()
 	query.Set("client_id", clientID)
 	query.Set("response_type", "code")
-	query.Set("redirect_uri", "http://127.0.0.1:8080/callback")
+	query.Set("redirect_uri", redirectURI())
 	query.Set("state", stateVal)
 	query.Set("scope", "playlist-read-private playlist-read-collaborative user-library-read")
 	query.Set("code_challenge_method", "S256")
@@ -87,7 +103,7 @@ func initiateSpotifyAuth(clientID string) (code, codeVerifier, state string, err
 	authURL.RawQuery = query.Encode()
 
 	// 2. Start the callback server
-	codeChan, shutdown, err := startCallbackServer("127.0.0.1:8080")
+	codeChan, shutdown, err := startCallbackServer(callbackAddress())
 	if err != nil {
 		return "", "", "", fmt.Errorf("start callback server: %w", err)
 	}
