@@ -429,3 +429,87 @@ func TestAlbumDecodesImages(t *testing.T) {
 		t.Errorf("GetAlbumCoverArtURL() = %q, want the 300px URL", got)
 	}
 }
+
+func TestJoinArtistNames(t *testing.T) {
+	// This is what goes in the ID3 artist tag, as opposed to FileName which
+	// keeps only the first artist. A collaboration should credit everyone where
+	// software actually reads it.
+	tests := []struct {
+		name    string
+		artists []Artist
+		want    string
+	}{
+		{
+			name:    "one artist",
+			artists: []Artist{{Name: "Logic"}},
+			want:    "Logic",
+		},
+		{
+			name:    "two artists",
+			artists: []Artist{{Name: "Koven"}, {Name: "Alex Hobson"}},
+			want:    "Koven, Alex Hobson",
+		},
+		{
+			name:    "several artists",
+			artists: []Artist{{Name: "A"}, {Name: "B"}, {Name: "C"}, {Name: "D"}},
+			want:    "A, B, C, D",
+		},
+		{
+			// Spotify names carry stray whitespace often enough that this is
+			// worth pinning rather than assuming.
+			name:    "whitespace is trimmed per name",
+			artists: []Artist{{Name: "  Logic  "}, {Name: "\tAsake\n"}},
+			want:    "Logic, Asake",
+		},
+		{
+			// A local file or a delisted track can have none. An empty tag is
+			// right here; panicking is not.
+			name:    "no artists",
+			artists: nil,
+			want:    "",
+		},
+		{
+			name:    "an empty name among real ones",
+			artists: []Artist{{Name: "Logic"}, {Name: ""}},
+			want:    "Logic, ",
+		},
+		{
+			// Illegal filename characters are not sanitised here - that is
+			// FileName's job. The tag can hold anything.
+			name:    "slashes survive, unlike in a filename",
+			artists: []Artist{{Name: "AC/DC"}},
+			want:    "AC/DC",
+		},
+		{
+			name:    "unicode",
+			artists: []Artist{{Name: "¥ØU$UK€ ¥OKOTA"}, {Name: "IÖN"}},
+			want:    "¥ØU$UK€ ¥OKOTA, IÖN",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			track := Track{Name: "Some Track", Artists: test.artists}
+			if got := track.JoinArtistNames(); got != test.want {
+				t.Errorf("JoinArtistNames() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestJoinArtistNamesDiffersFromFileName(t *testing.T) {
+	// The deliberate split recorded in the project notes: filenames stay
+	// readable with one artist, the tag keeps the full credit. A change that
+	// collapsed them into one would pass every other test.
+	track := Track{
+		Name:    "Gravity",
+		Artists: []Artist{{Name: "Koven"}, {Name: "Alex Hobson"}},
+	}
+
+	if got := track.FileName(); got != "Gravity - Koven" {
+		t.Errorf("FileName() = %q, want only the first artist", got)
+	}
+	if got := track.JoinArtistNames(); got != "Koven, Alex Hobson" {
+		t.Errorf("JoinArtistNames() = %q, want every artist", got)
+	}
+}

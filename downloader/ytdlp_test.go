@@ -1,9 +1,11 @@
 package downloader
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -109,5 +111,125 @@ func TestFindJSRuntime(t *testing.T) {
 				t.Errorf("FindJSRuntime() = %q, want %q", got, test.want)
 			}
 		})
+	}
+}
+
+// fakeCacheHome points os.UserCacheDir at a temp directory. XDG_CACHE_HOME is
+// checked before $HOME/.cache on Linux, so setting HOME alone is not enough.
+func fakeCacheHome(t *testing.T) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", dir) // linux
+	t.Setenv("HOME", dir)           // macos reaches it through HOME
+	t.Setenv("LocalAppData", dir)   // windows
+	t.Setenv("USERPROFILE", dir)    // windows fallback
+
+	return dir
+}
+
+func TestYtdlpCachePath(t *testing.T) {
+	base := fakeCacheHome(t)
+
+	path, err := ytdlpCachePath()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !filepath.IsAbs(path) {
+		t.Errorf("ytdlpCachePath() = %q, want an absolute path", path)
+	}
+	if !strings.HasPrefix(path, base) {
+		t.Errorf("ytdlpCachePath() = %q, want it under %q", path, base)
+	}
+	if filepath.Base(filepath.Dir(path)) != "trackorganiser" {
+		t.Errorf("ytdlpCachePath() = %q, want it in a trackorganiser directory", path)
+	}
+
+	// The filename is the platform asset name, so the downloaded binary is
+	// recognisable and a different platform's copy cannot be mistaken for it.
+	wantName, err := ytdlpAssetName(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		t.Fatalf("resolving the asset name: %v", err)
+	}
+	if filepath.Base(path) != wantName {
+		t.Errorf("filename = %q, want %q", filepath.Base(path), wantName)
+	}
+}
+
+func TestFindYtDlpPrefersPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("relies on a shell script standing in for yt-dlp")
+	}
+
+	// A real install always wins over the cached copy. The project downloads
+	// into the cache deliberately rather than onto PATH, so that a proper
+	// install later is never shadowed by ours.
+	binDir := t.TempDir()
+	onPath := filepath.Join(binDir, "yt-dlp")
+	if err := os.WriteFile(onPath, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatalf("setting up: %v", err)
+	}
+	t.Setenv("PATH", binDir)
+
+	fakeCacheHome(t)
+
+	// Put something in the cache too, so "prefers PATH" is actually being
+	// tested rather than "only PATH exists".
+	cachePath, err := ytdlpCachePath()
+	if err != nil {
+		t.Fatalf("resolving the cache path: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0755); err != nil {
+		t.Fatalf("setting up: %v", err)
+	}
+	if err := os.WriteFile(cachePath, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatalf("setting up: %v", err)
+	}
+
+	found, err := FindYtDlp()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if found != onPath {
+		t.Errorf("FindYtDlp() = %q, want the copy on PATH at %q", found, onPath)
+	}
+}
+
+func TestFindYtDlpFallsBackToTheCache(t *testing.T) {
+	t.Setenv("PATH", t.TempDir()) // nothing installed
+	fakeCacheHome(t)
+
+	cachePath, err := ytdlpCachePath()
+	if err != nil {
+		t.Fatalf("resolving the cache path: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0755); err != nil {
+		t.Fatalf("setting up: %v", err)
+	}
+	if err := os.WriteFile(cachePath, []byte("not really yt-dlp"), 0755); err != nil {
+		t.Fatalf("setting up: %v", err)
+	}
+
+	found, err := FindYtDlp()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if found != cachePath {
+		t.Errorf("FindYtDlp() = %q, want the cached copy at %q", found, cachePath)
+	}
+}
+
+func TestFindYtDlpReportsMissing(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	fakeCacheHome(t)
+
+	_, err := FindYtDlp()
+
+	// A specific sentinel, not any error: main matches on it with errors.Is to
+	// decide whether to offer the download, and a generic failure must not
+	// trigger that offer.
+	if !errors.Is(err, ErrYtDlpMissing) {
+		t.Errorf("FindYtDlp() error = %v, want ErrYtDlpMissing", err)
 	}
 }
