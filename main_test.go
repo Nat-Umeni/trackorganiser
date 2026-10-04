@@ -591,3 +591,24 @@ func TestReportYtdlpExtrasWithNeitherAvailable(t *testing.T) {
 		}
 	}
 }
+
+func TestClientIDHelpIsCopyPasteable(t *testing.T) {
+	fakeConfigDir(t)
+
+	help := clientIDHelp()
+
+	// Without a leading ./ PowerShell refuses to run a binary in the current
+	// directory, and so do sh and bash. This message exists to unblock someone
+	// who has been handed a binary and nothing else, so the command in it has to
+	// work as printed.
+	prefix := "." + string(os.PathSeparator)
+	if !strings.Contains(help, prefix) {
+		t.Errorf("the command has no %q prefix, so it won't run as printed:\n%s", prefix, help)
+	}
+
+	// And it must name the binary as actually invoked, not a hardcoded name -
+	// the README tells people to rename it.
+	if !strings.Contains(help, filepath.Base(os.Args[0])) {
+		t.Errorf("the command does not name this binary:\n%s", help)
+	}
+}

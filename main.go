@@ -87,12 +87,17 @@ func clientIDHelp() string {
 		location = dir
 	}
 
+	// The "./" prefix matters: without it PowerShell refuses to run a binary in
+	// the current directory, and so do sh and bash. Copy-pasteable beats tidy
+	// for a message whose whole job is unblocking someone.
+	command := "." + string(os.PathSeparator) + filepath.Base(os.Args[0])
+
 	return fmt.Sprintf(`This needs a Spotify client ID before it can read your playlists. Ask me for it, then run:
 
   %s -client-id THE-ID-I-GAVE-YOU
 
 That only needs doing once. It is saved in %s and picked up automatically
-from then on.`, filepath.Base(os.Args[0]), location)
+from then on.`, command, location)
 }
 
 // ErrDownloadDirDeclined means the user chose not to create the download
