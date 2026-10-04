@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -22,10 +21,77 @@ import (
 
 const maxJobs = 16
 
+// version is overridden at link time by build.sh with -ldflags -X. The literal
+// default means a plain `go build` still works and reads honestly.
+var version = "dev"
+
+// hiddenFlags are accepted but kept out of -h. The callback port only works
+// against a redirect URI registered in the Spotify dashboard, so offering it
+// would mostly generate confusing failures.
+var hiddenFlags = map[string]bool{"port": true}
+
 func init() {
-	if err := godotenv.Load(); err != nil {
-		fmt.Println("No .env file, continuing")
+	// A missing .env is the normal case for anyone but me - the client
+	// ID comes from the config file instead. Nothing is printed, because
+	// announcing it and then failing one line later is what made the old
+	// startup read like a bug.
+	_ = godotenv.Load()
+}
+
+// writeUsage replaces flag's own output so hiddenFlags can be left out. Giving a
+// flag an empty usage string does not hide it, it just shows a blank
+// description. Takes the set so a test can pass its own.
+func writeUsage(set *flag.FlagSet) {
+	out := set.Output()
+	fmt.Fprintf(out, "Usage of %s:\n", os.Args[0])
+
+	set.VisitAll(func(f *flag.Flag) {
+		if hiddenFlags[f.Name] {
+			return
+		}
+
+		fmt.Fprintf(out, "  -%s\n    \t%s", f.Name, f.Usage)
+		if f.DefValue != "" && f.DefValue != "false" {
+			fmt.Fprintf(out, " (default %s)", f.DefValue)
+		}
+		fmt.Fprintln(out)
+	})
+}
+
+// resolveClientID checks the flag, then the config file, then the environment,
+// and saves anything passed by flag. The flag wins so a wrong saved value can be
+// fixed by re-running rather than editing JSON by hand.
+func resolveClientID(flagValue string) string {
+	if trimmed := strings.TrimSpace(flagValue); trimmed != "" {
+		if err := spotify.SaveClientID(trimmed); err != nil {
+			// Not fatal: the ID works for this run, it just will not persist.
+			fmt.Printf("Couldn't save the client ID for next time: %v\n", err)
+		}
+		return trimmed
 	}
+
+	if saved := spotify.LoadClientID(); saved != "" {
+		return saved
+	}
+
+	return strings.TrimSpace(os.Getenv("SPOTIFY_CLIENT_ID"))
+}
+
+// clientIDHelp is printed when there is no client ID to be found. It has to name
+// the exact command, because the person reading it has been handed a binary and
+// an ID and nothing else.
+func clientIDHelp() string {
+	location := "your user config directory"
+	if dir, err := spotify.ConfigDir(); err == nil {
+		location = dir
+	}
+
+	return fmt.Sprintf(`This needs a Spotify client ID before it can read your playlists. Ask me for it, then run:
+
+  %s -client-id THE-ID-I-GAVE-YOU
+
+That only needs doing once. It is saved in %s and picked up automatically
+from then on.`, filepath.Base(os.Args[0]), location)
 }
 
 // ErrDownloadDirDeclined means the user chose not to create the download
@@ -41,15 +107,29 @@ func main() {
 	var jobs int
 	var dryRun bool
 	var noRetag bool
+	var clientIDFlag string
+	var showVersion bool
+	var callbackPort int
 	flag.IntVar(&jobs, "jobs", 4, "how many tracks to download at once (1-16) - higher risks rate limiting")
 	flag.BoolVar(&dryRun, "dry-run", false, "list the filename each track would get without downloading anything")
 	flag.BoolVar(&noRetag, "no-retag", false, "skip rewriting ID3 tags on tracks already downloaded (much faster: retagging costs each file's full size in I/O)")
+	flag.StringVar(&clientIDFlag, "client-id", "", "your Spotify client ID - only needed once, it gets saved")
+	flag.BoolVar(&showVersion, "version", false, "print the version and exit")
+	flag.IntVar(&callbackPort, "port", spotify.CallbackPort, "")
+	flag.Usage = func() { writeUsage(flag.CommandLine) }
 	flag.Parse()
 	jobs = clampJobs(jobs)
+	spotify.CallbackPort = callbackPort
 
-	clientID := os.Getenv("SPOTIFY_CLIENT_ID")
+	if showVersion {
+		fmt.Println(version)
+		return
+	}
+
+	clientID := resolveClientID(clientIDFlag)
 	if clientID == "" {
-		log.Fatal("SPOTIFY_CLIENT_ID not set")
+		fmt.Println(clientIDHelp())
+		os.Exit(1)
 	}
 
 	ytdlpPath, err := downloader.FindYtDlp()
@@ -422,12 +502,6 @@ func ensureOutputLocationExists(downloadPath string) (string, error) {
 	}
 
 	return safeDownloadPath, nil
-}
-
-func dd(v any) {
-	out, _ := json.MarshalIndent(v, "", "  ")
-	fmt.Println(string(out))
-	os.Exit(1)
 }
 
 // reportYtdlpExtras says what optional yt-dlp support was found, so a run that
