@@ -3,7 +3,9 @@ package main
 import (
 	"bufio"
 	"errors"
+	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -384,5 +386,208 @@ func TestDownloadTracksWithNoTracks(t *testing.T) {
 
 	if mismatches := downloadTracks(dl, nil, 4); len(mismatches) != 0 {
 		t.Errorf("got %v, want nothing back for an empty track list", mismatches)
+	}
+}
+
+// fakeConfigDir points os.UserConfigDir at a temp directory so tests never touch
+// the real one.
+//
+// fakeHome alone is not enough: on Linux os.UserConfigDir checks XDG_CONFIG_HOME
+// *before* falling back to $HOME/.config, so a machine with it set would write
+// into my actual config.
+func fakeConfigDir(t *testing.T) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)  // linux
+	t.Setenv("HOME", dir)             // macos falls back through HOME
+	t.Setenv("AppData", dir)          // windows
+	t.Setenv("USERPROFILE", dir)      // windows fallback
+	t.Setenv("SPOTIFY_CLIENT_ID", "") // so a real env var cannot leak in
+
+	return dir
+}
+
+func TestResolveClientIDPrefersTheFlag(t *testing.T) {
+	fakeConfigDir(t)
+
+	if err := spotify.SaveClientID("saved-one"); err != nil {
+		t.Fatalf("setting up: %v", err)
+	}
+	t.Setenv("SPOTIFY_CLIENT_ID", "env-one")
+
+	// The flag has to win, or a wrong saved value could never be corrected
+	// without hand-editing the config file - which is the thing this whole
+	// change exists to avoid.
+	if got := resolveClientID("flag-one"); got != "flag-one" {
+		t.Errorf("resolveClientID() = %q, want the flag value", got)
+	}
+
+	// And it replaces what was stored, so the next run agrees.
+	if got := spotify.LoadClientID(); got != "flag-one" {
+		t.Errorf("saved value = %q, want the flag to have overwritten it", got)
+	}
+}
+
+func TestResolveClientIDFallsBackInOrder(t *testing.T) {
+	tests := []struct {
+		name  string
+		flag  string
+		saved string
+		env   string
+		want  string
+	}{
+		{name: "flag only", flag: "from-flag", want: "from-flag"},
+		{name: "saved only", saved: "from-config", want: "from-config"},
+		{name: "env only", env: "from-env", want: "from-env"},
+
+		// Saved beats the environment, so someone who once used a .env and has
+		// since passed the flag does not silently revert.
+		{name: "saved beats env", saved: "from-config", env: "from-env", want: "from-config"},
+
+		{name: "nothing at all", want: ""},
+
+		// Whitespace is what a copy-paste from a dashboard actually looks like,
+		// and a trailing space gives an opaque Spotify rejection.
+		{name: "flag is trimmed", flag: "  padded  ", want: "padded"},
+		{name: "env is trimmed", env: "\tpadded\n", want: "padded"},
+		{name: "flag of only spaces is treated as absent", flag: "   ", saved: "from-config", want: "from-config"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fakeConfigDir(t)
+
+			if test.saved != "" {
+				if err := spotify.SaveClientID(test.saved); err != nil {
+					t.Fatalf("setting up: %v", err)
+				}
+			}
+			if test.env != "" {
+				t.Setenv("SPOTIFY_CLIENT_ID", test.env)
+			}
+
+			if got := resolveClientID(test.flag); got != test.want {
+				t.Errorf("resolveClientID(%q) = %q, want %q", test.flag, got, test.want)
+			}
+		})
+	}
+}
+
+func TestClientIDHelpNamesTheCommand(t *testing.T) {
+	fakeConfigDir(t)
+
+	help := clientIDHelp()
+
+	// Whoever reads this has been handed a binary and an ID and nothing else,
+	// so the exact flag has to appear or the message is no better than the bare
+	// "SPOTIFY_CLIENT_ID not set" it replaced.
+	for _, want := range []string{"-client-id", "client ID", "once"} {
+		if !strings.Contains(help, want) {
+			t.Errorf("the help text does not mention %q:\n%s", want, help)
+		}
+	}
+
+	// It must not tell someone to go and make a Spotify app.
+	for _, unwanted := range []string{"dashboard", "developer.spotify.com", "create an app"} {
+		if strings.Contains(help, unwanted) {
+			t.Errorf("the help text mentions %q, but users are not creating apps", unwanted)
+		}
+	}
+}
+
+func TestWriteUsageHidesThePortFlag(t *testing.T) {
+	// The port only works against a redirect URI registered in the Spotify
+	// dashboard, so advertising it would mostly produce confusing failures.
+	// This test is what keeps it hidden if anyone touches flag.Usage later.
+	set := flag.NewFlagSet("trackorganiser", flag.ContinueOnError)
+	set.Int("jobs", 4, "how many tracks at once")
+	set.Bool("dry-run", false, "list filenames only")
+	set.String("client-id", "", "your Spotify client ID")
+	set.Int("port", 8080, "")
+
+	var out strings.Builder
+	set.SetOutput(&out)
+	writeUsage(set)
+
+	if strings.Contains(out.String(), "-port") {
+		t.Errorf("-port appears in the usage output:\n%s", out.String())
+	}
+
+	// The others must still be listed, or "hidden" has become "broken".
+	for _, want := range []string{"-jobs", "-dry-run", "-client-id"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("%s is missing from the usage output:\n%s", want, out.String())
+		}
+	}
+}
+
+// captureStdout runs fn with os.Stdout redirected, returning what was written.
+// The same shape as the helper in spotify/auth_test.go - a separate copy because
+// it is a different package.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("setting up: %v", err)
+	}
+
+	previous := os.Stdout
+	os.Stdout = writer
+	fn()
+	os.Stdout = previous
+	writer.Close()
+
+	var captured strings.Builder
+	if _, err := io.Copy(&captured, reader); err != nil {
+		t.Fatalf("reading captured output: %v", err)
+	}
+
+	return captured.String()
+}
+
+func TestReportYtdlpExtrasAlwaysSaysSomething(t *testing.T) {
+	// Both extras are survivable when missing, which is exactly why they get
+	// announced: a run quietly lacking either looks like unrelated download
+	// failures later. Silence is the one unacceptable outcome, whatever this
+	// machine happens to have installed.
+	output := captureStdout(t, reportYtdlpExtras)
+
+	mentionsRuntime := strings.Contains(output, "for YouTube extraction") ||
+		strings.Contains(output, "No JavaScript runtime found")
+	if !mentionsRuntime {
+		t.Errorf("nothing said about the JavaScript runtime:\n%s", output)
+	}
+
+	mentionsCookies := strings.Contains(output, "Firefox cookies") ||
+		strings.Contains(output, "No Firefox cookies")
+	if !mentionsCookies {
+		t.Errorf("nothing said about cookies:\n%s", output)
+	}
+}
+
+func TestReportYtdlpExtrasWithNeitherAvailable(t *testing.T) {
+	// The case that matters: an empty PATH and no home directory means no
+	// runtime and no cookie store, and the warnings have to name what is
+	// missing rather than just going quiet.
+	t.Setenv("PATH", t.TempDir())
+	fakeHome(t)
+
+	output := captureStdout(t, reportYtdlpExtras)
+
+	if !strings.Contains(output, "No JavaScript runtime found") {
+		t.Errorf("no warning about the missing runtime:\n%s", output)
+	}
+	if !strings.Contains(output, "No Firefox cookies") {
+		t.Errorf("no warning about missing cookies:\n%s", output)
+	}
+
+	// The warning has to name the runtimes, or someone reading it cannot act
+	// on it.
+	for _, runtimeName := range []string{"deno", "node", "quickjs", "bun"} {
+		if !strings.Contains(output, runtimeName) {
+			t.Errorf("the warning does not mention %q:\n%s", runtimeName, output)
+		}
 	}
 }
