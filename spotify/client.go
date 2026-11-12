@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/Nat-Umeni/trackorganiser/config"
 	"io"
 	"net/http"
 	"net/url"
@@ -36,7 +37,7 @@ const tokenCacheFileName = "spotify_token.json"
 
 // tokenCachePath resolves where the refresh token is kept.
 func tokenCachePath() (string, error) {
-	dir, err := ConfigDir()
+	dir, err := config.ConfigDir()
 	if err != nil {
 		return "", err
 	}

@@ -37,6 +37,9 @@ jobs:
       - name: Build every platform
         run: ./build.sh "${GITHUB_REF_NAME}"
 
+      - name: Run checksum on the binaries
+        run: cd ./dist && sha256sum trackorganiser-* > checksums.txt
+
       # gh is pre-installed on GitHub's runners and GITHUB_TOKEN is provided
       # automatically, so this needs no third-party action running with write
       # access to the repo.

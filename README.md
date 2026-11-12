@@ -136,6 +136,25 @@ up:
 16 is the maximum. On a reasonable machine that's roughly seven times quicker
 than one at a time — a 60-track playlist drops from about 7 minutes to about 1.
 
+## Updating
+
+It checks for a new version each time it starts and asks before installing it:
+
+```
+Version v0.3.0 is out (you have v0.2.0). Update now? [Y/n]
+```
+
+Say yes and it downloads the new version, checks it against the release's
+checksum, and replaces itself. It keeps the name you renamed it to. Then **run it
+again** to use the new version.
+
+Say no and it won't ask about that version again, only the one after it.
+
+If you have **v0.1.0**, it can't update itself because it predates this feature.
+Download the latest version from the [releases page](../../releases) once by
+hand, and it takes care of itself from then on. `-version` tells you which you
+have.
+
 ## Options
 
 ```

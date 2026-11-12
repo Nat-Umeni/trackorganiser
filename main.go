@@ -15,8 +15,10 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/Nat-Umeni/trackorganiser/config"
 	"github.com/Nat-Umeni/trackorganiser/downloader"
 	"github.com/Nat-Umeni/trackorganiser/spotify"
+	"github.com/Nat-Umeni/trackorganiser/updater"
 	"github.com/joho/godotenv"
 )
 
@@ -64,14 +66,14 @@ func writeUsage(set *flag.FlagSet) {
 // fixed by re-running rather than editing JSON by hand.
 func resolveClientID(flagValue string) string {
 	if trimmed := strings.TrimSpace(flagValue); trimmed != "" {
-		if err := spotify.SaveClientID(trimmed); err != nil {
+		if err := config.SaveClientID(trimmed); err != nil {
 			// Not fatal: the ID works for this run, it just will not persist.
 			fmt.Printf("Couldn't save the client ID for next time: %v\n", err)
 		}
 		return trimmed
 	}
 
-	if saved := spotify.LoadClientID(); saved != "" {
+	if saved := config.LoadClientID(); saved != "" {
 		return saved
 	}
 
@@ -83,7 +85,7 @@ func resolveClientID(flagValue string) string {
 // an ID and nothing else.
 func clientIDHelp() string {
 	location := "your user config directory"
-	if dir, err := spotify.ConfigDir(); err == nil {
+	if dir, err := config.ConfigDir(); err == nil {
 		location = dir
 	}
 
@@ -98,6 +100,63 @@ func clientIDHelp() string {
 
 That only needs doing once. It is saved in %s and picked up automatically
 from then on.`, command, location)
+}
+
+// shouldOfferUpdate decides whether to ask about latest. A version once said no
+// to is never asked about again, but the next one after it is - declining
+// v0.2.0 shouldn't mean never hearing about v0.3.0.
+func shouldOfferUpdate(current, latest, declined string) bool {
+	return latest != declined && updater.IsNewer(current, latest)
+}
+
+// checkForUpdate offers the newest GitHub release when this binary is older, and
+// installs it on a yes. It returns true when the binary was replaced, meaning
+// this run should stop - the process is still the old version, and carrying on
+// would quietly do a whole run on the code that was just updated away.
+//
+// Nothing here is fatal. Being offline, GitHub refusing, or a failed download
+// all just mean carrying on with the version already here.
+func checkForUpdate() bool {
+	// A plain `go build` or an untagged build has nothing to compare against,
+	// and shouldn't be offered a release over the top of local changes.
+	if !updater.IsRelease(version) {
+		return false
+	}
+
+	latest, err := updater.LatestVersion()
+	if err != nil {
+		fmt.Printf("Couldn't check for updates: %v\n", err)
+		return false
+	}
+
+	if !shouldOfferUpdate(version, latest, config.LoadDeclinedVersion()) {
+		return false
+	}
+
+	answer, err := readLine(fmt.Sprintf("Version %s is out (you have %s). Update now? [Y/n] ", latest, version))
+	if err != nil {
+		fmt.Printf("Couldn't read your answer, carrying on with %s: %v\n", version, err)
+		return false
+	}
+
+	if strings.EqualFold(answer, "n") || strings.EqualFold(answer, "no") {
+		if err := config.SaveDeclinedVersion(latest); err != nil {
+			// Not fatal: it just asks again next time.
+			fmt.Printf("Couldn't save that, so it will ask again next time: %v\n", err)
+		} else {
+			fmt.Printf("OK, it won't ask about %s again.\n", latest)
+		}
+		return false
+	}
+
+	fmt.Printf("Downloading %s...\n", latest)
+	if err := updater.Apply(latest); err != nil {
+		fmt.Printf("Update failed, carrying on with %s: %v\n", version, err)
+		return false
+	}
+
+	fmt.Printf("Updated to %s. Run it again to use the new version.\n", latest)
+	return true
 }
 
 // ErrDownloadDirDeclined means the user chose not to create the download
@@ -129,6 +188,13 @@ func main() {
 
 	if showVersion {
 		fmt.Println(version)
+		return
+	}
+
+	// Before everything else, including the client ID, so a fix for whatever
+	// is stopping someone reaches them even if they can't get past it.
+	updater.CleanupOld()
+	if checkForUpdate() {
 		return
 	}
 

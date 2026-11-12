@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Nat-Umeni/trackorganiser/config"
 	"github.com/Nat-Umeni/trackorganiser/downloader"
 	"github.com/Nat-Umeni/trackorganiser/spotify"
 )
@@ -411,7 +412,7 @@ func fakeConfigDir(t *testing.T) string {
 func TestResolveClientIDPrefersTheFlag(t *testing.T) {
 	fakeConfigDir(t)
 
-	if err := spotify.SaveClientID("saved-one"); err != nil {
+	if err := config.SaveClientID("saved-one"); err != nil {
 		t.Fatalf("setting up: %v", err)
 	}
 	t.Setenv("SPOTIFY_CLIENT_ID", "env-one")
@@ -424,7 +425,7 @@ func TestResolveClientIDPrefersTheFlag(t *testing.T) {
 	}
 
 	// And it replaces what was stored, so the next run agrees.
-	if got := spotify.LoadClientID(); got != "flag-one" {
+	if got := config.LoadClientID(); got != "flag-one" {
 		t.Errorf("saved value = %q, want the flag to have overwritten it", got)
 	}
 }
@@ -459,7 +460,7 @@ func TestResolveClientIDFallsBackInOrder(t *testing.T) {
 			fakeConfigDir(t)
 
 			if test.saved != "" {
-				if err := spotify.SaveClientID(test.saved); err != nil {
+				if err := config.SaveClientID(test.saved); err != nil {
 					t.Fatalf("setting up: %v", err)
 				}
 			}
@@ -519,6 +520,56 @@ func TestWriteUsageHidesThePortFlag(t *testing.T) {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("%s is missing from the usage output:\n%s", want, out.String())
 		}
+	}
+}
+
+func TestShouldOfferUpdate(t *testing.T) {
+	tests := []struct {
+		name     string
+		current  string
+		latest   string
+		declined string
+		want     bool
+	}{
+		{name: "newer, never declined", current: "v0.1.0", latest: "v0.2.0", want: true},
+		{name: "already on the latest", current: "v0.2.0", latest: "v0.2.0", want: false},
+
+		// The whole point of DeclinedVersion: no means no for that version...
+		{name: "that version was declined", current: "v0.1.0", latest: "v0.2.0", declined: "v0.2.0", want: false},
+
+		// ...but not for the one after it.
+		{name: "a newer one than was declined", current: "v0.1.0", latest: "v0.3.0", declined: "v0.2.0", want: true},
+
+		{name: "dev build", current: "dev", latest: "v0.2.0", want: false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := shouldOfferUpdate(test.current, test.latest, test.declined)
+			if got != test.want {
+				t.Errorf("shouldOfferUpdate(%q, %q, %q) = %v, want %v",
+					test.current, test.latest, test.declined, got, test.want)
+			}
+		})
+	}
+}
+
+// Tests build with version = "dev", which is exactly the case that must not
+// reach the network - otherwise every `go run .` while developing would ask
+// GitHub, and offer to overwrite the build with a release.
+func TestCheckForUpdateSkipsDevBuilds(t *testing.T) {
+	if version != "dev" {
+		t.Skipf("built with version %q, this test needs the dev default", version)
+	}
+
+	var updated bool
+	output := captureStdout(t, func() { updated = checkForUpdate() })
+
+	if updated {
+		t.Error("checkForUpdate reported an update on a dev build")
+	}
+	if output != "" {
+		t.Errorf("a dev build printed something, so it got past the release check:\n%s", output)
 	}
 }
 

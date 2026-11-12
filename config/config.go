@@ -1,4 +1,4 @@
-package spotify
+package config
 
 import (
 	"encoding/json"
@@ -15,7 +15,8 @@ const configFileName = "config.json"
 // because the token cache already is, and a default download directory is the
 // obvious next thing to want in here.
 type config struct {
-	ClientID string `json:"client_id"`
+	ClientID        string `json:"client_id"`
+	DeclinedVersion string `json:"declined_version"`
 }
 
 // ConfigDir returns the directory holding the client ID and the refresh token,
@@ -67,23 +68,24 @@ func LoadClientID() string {
 	return loadConfig().ClientID
 }
 
-// SaveClientID stores the client ID so it only ever has to be supplied once.
-//
-// The value is trimmed because it arrives by copy-paste from whoever handed it
-// over, and a trailing space produces an opaque Spotify rejection rather than a
-// clear one.
-func SaveClientID(clientID string) error {
+func LoadDeclinedVersion() string {
+	return loadConfig().DeclinedVersion
+}
+
+func SaveDeclinedVersion(declinedVersion string) error {
+	stored := loadConfig()
+	stored.DeclinedVersion = strings.TrimSpace(declinedVersion)
+
+	return saveConfig(stored)
+}
+
+func saveConfig(config config) error {
 	dir, err := ConfigDir()
 	if err != nil {
 		return err
 	}
 
-	// Read-modify-write rather than overwrite, so adding a second setting later
-	// cannot quietly discard this one.
-	stored := loadConfig()
-	stored.ClientID = strings.TrimSpace(clientID)
-
-	contents, err := json.MarshalIndent(stored, "", "  ")
+	contents, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode config: %w", err)
 	}
@@ -94,4 +96,17 @@ func SaveClientID(clientID string) error {
 	}
 
 	return nil
+}
+
+// SaveClientID stores the client ID so it only ever has to be supplied once.
+// The value is trimmed because it arrives by copy-paste from whoever handed it
+// over, and a trailing space produces an opaque Spotify rejection rather than a
+// clear one.
+func SaveClientID(clientID string) error {
+	// Read-modify-write rather than overwrite, so adding a second setting later
+	// cannot quietly discard this one.
+	stored := loadConfig()
+	stored.ClientID = strings.TrimSpace(clientID)
+
+	return saveConfig(stored)
 }
