@@ -29,6 +29,29 @@ type selectionRecord struct {
 	builder  strings.Builder
 	kept     int
 	keptInfo videoInfo
+
+	// deeper is set when the kept download came from a listing rather than a
+	// search's first result.
+	deeper bool
+}
+
+// note adds a free-form line - the deeper pick's listings use it.
+func (r *selectionRecord) note(format string, args ...any) {
+	if r == nil {
+		return
+	}
+
+	fmt.Fprintf(&r.builder, "  "+format+"\n", args...)
+}
+
+// keepDeeper records that a result from a listing replaced the first pick.
+func (r *selectionRecord) keepDeeper(info videoInfo) {
+	if r == nil {
+		return
+	}
+
+	r.deeper = true
+	r.keptInfo = info
 }
 
 func newSelectionRecord(req Request) *selectionRecord {
@@ -96,9 +119,12 @@ func (r *selectionRecord) finish(err error) {
 		result = oneLine(err)
 	}
 
-	if r.kept >= 0 {
+	switch {
+	case r.deeper:
+		fmt.Fprintf(&r.builder, "  kept the deeper pick   result: %s\n\n", result)
+	case r.kept >= 0:
 		fmt.Fprintf(&r.builder, "  kept #%d   result: %s\n\n", r.kept+1, result)
-	} else {
+	default:
 		fmt.Fprintf(&r.builder, "  kept nothing   result: %s\n\n", result)
 	}
 
@@ -106,7 +132,11 @@ func (r *selectionRecord) finish(err error) {
 	io.WriteString(SelectionLog, r.builder.String())
 	selectionLogLock.Unlock()
 
-	if r.kept > 0 {
+	switch {
+	case r.deeper:
+		fmt.Printf("Found a closer match for %s: %q (%s)\n",
+			r.fileName, r.keptInfo.Title, r.keptInfo.Channel)
+	case r.kept > 0:
 		fmt.Printf("Retried %s: kept %q (%s) from search %d\n",
 			r.fileName, r.keptInfo.Title, r.keptInfo.Channel, r.kept+1)
 	}

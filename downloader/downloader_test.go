@@ -261,7 +261,10 @@ func TestNewAudioDownloaderScansExistingFiles(t *testing.T) {
 
 func TestYtdlpArgs(t *testing.T) {
 	const outputPath = "/music/Playlist/Touch - KATSEYE"
-	const query = "Touch KATSEYE topic"
+
+	// The caller says what to download - a search or one exact video - so the
+	// target is passed whole rather than built here.
+	const target = "ytsearch:Touch KATSEYE topic"
 
 	tests := []struct {
 		name       string
@@ -312,7 +315,7 @@ func TestYtdlpArgs(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			args := ytdlpArgs(outputPath, query, test.jsRuntime, test.infoPath, test.useCookies)
+			args := ytdlpArgs(outputPath, target, test.jsRuntime, test.infoPath, test.useCookies)
 			joined := strings.Join(args, " ")
 
 			for _, flag := range test.wantFlags {
@@ -326,15 +329,56 @@ func TestYtdlpArgs(t *testing.T) {
 				}
 			}
 
-			// The search term has to stay last - yt-dlp takes it positionally,
-			// so a flag appended after it would be read as another URL.
-			if last := args[len(args)-1]; last != "ytsearch:"+query {
-				t.Errorf("last arg is %q, want the ytsearch term", last)
+			// The target has to stay last - yt-dlp takes it positionally, so a
+			// flag appended after it would be read as another URL.
+			if last := args[len(args)-1]; last != target {
+				t.Errorf("last arg is %q, want the target %q", last, target)
 			}
 			if !slices.Contains(args, outputPath+".%(ext)s") {
 				t.Errorf("args %q missing the output template", joined)
 			}
 		})
+	}
+}
+
+// The deeper pick downloads one exact video it chose from a listing, so a URL
+// has to go through untouched rather than being turned into a search.
+func TestYtdlpArgsWithAVideoURL(t *testing.T) {
+	const url = "https://www.youtube.com/watch?v=abc123"
+
+	args := ytdlpArgs("/music/x", url, "", "", false)
+	if last := args[len(args)-1]; last != url {
+		t.Errorf("last arg is %q, want the URL itself", last)
+	}
+}
+
+func TestListArgs(t *testing.T) {
+	args := listArgs(`Easy "Nokaut" topic`, 5)
+	joined := strings.Join(args, " ")
+
+	// --flat-playlist is what makes this a listing: it reads the results page
+	// and stops, without resolving or downloading any of the videos.
+	for _, flag := range []string{"--flat-playlist", "--print"} {
+		if !slices.Contains(args, flag) {
+			t.Errorf("args %q missing %q", joined, flag)
+		}
+	}
+
+	// The same fields as a download records, so one parser reads both - but
+	// without "after_move", which only exists for a real download.
+	if !slices.Contains(args, strings.TrimPrefix(videoInfoTemplate, "after_move:")) {
+		t.Errorf("args %q don't print the video info fields", joined)
+	}
+
+	// Nothing that downloads or writes a file.
+	for _, flag := range []string{"-x", "--output", "--print-to-file"} {
+		if slices.Contains(args, flag) {
+			t.Errorf("args %q contain %q, but a listing must not download", joined, flag)
+		}
+	}
+
+	if last := args[len(args)-1]; last != `ytsearch5:Easy "Nokaut" topic` {
+		t.Errorf("last arg is %q, want a 5-result search", last)
 	}
 }
 

@@ -255,3 +255,57 @@ func TestReadVideoInfo(t *testing.T) {
 		})
 	}
 }
+
+// A search listing prints one of these lines per result, straight to stdout
+// rather than a file, so the line parsing has to stand on its own.
+func TestParseVideoInfo(t *testing.T) {
+	tests := []struct {
+		name string
+		line string
+		want videoInfo
+	}{
+		// Measured: result 2 of the "Easy" search, the edit Spotify has.
+		{name: "every field", line: "abc123\tbreaksbeat5.0\t192\tNOKAUT - (Easy) - original mix ",
+			want: videoInfo{ID: "abc123", Channel: "breaksbeat5.0", Duration: "192", Title: "NOKAUT - (Easy) - original mix"}},
+		{name: "tabs inside the title", line: "abc\tSomeone\t200\tA\tB",
+			want: videoInfo{ID: "abc", Channel: "Someone", Duration: "200", Title: "A\tB"}},
+		{name: "title only", line: "Some Track", want: videoInfo{Title: "Some Track"}},
+		{name: "blank", line: "   ", want: videoInfo{}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := parseVideoInfo(test.line); got != test.want {
+				t.Errorf("parseVideoInfo(%q) = %+v, want %+v", test.line, got, test.want)
+			}
+		})
+	}
+}
+
+func TestVideoInfoDurationMS(t *testing.T) {
+	tests := []struct {
+		duration string
+		wantMS   int
+		wantOK   bool
+	}{
+		{duration: "192", wantMS: 192000, wantOK: true},
+		{duration: "192.5", wantMS: 192500, wantOK: true},
+
+		// yt-dlp prints NA for a field it doesn't have - a live stream, say. No
+		// length is not the same as a zero length, which would fail every check.
+		{duration: "NA", wantOK: false},
+		{duration: "", wantOK: false},
+		{duration: "0", wantOK: false},
+		{duration: "-3", wantOK: false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.duration, func(t *testing.T) {
+			gotMS, gotOK := videoInfo{Duration: test.duration}.durationMS()
+			if gotMS != test.wantMS || gotOK != test.wantOK {
+				t.Errorf("durationMS() for %q = %d, %v; want %d, %v",
+					test.duration, gotMS, gotOK, test.wantMS, test.wantOK)
+			}
+		})
+	}
+}

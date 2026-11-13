@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -58,7 +59,13 @@ func readVideoInfo(path string) videoInfo {
 		return videoInfo{}
 	}
 
-	line := strings.TrimSpace(string(contents))
+	return parseVideoInfo(string(contents))
+}
+
+// parseVideoInfo reads one line of videoInfoTemplate output. A downloaded
+// video's line comes from a file, a search listing's lines from stdout.
+func parseVideoInfo(line string) videoInfo {
+	line = strings.TrimSpace(line)
 
 	// SplitN, so tabs inside the title stay part of it.
 	fields := strings.SplitN(line, "\t", 4)
@@ -67,6 +74,18 @@ func readVideoInfo(path string) videoInfo {
 	}
 
 	return videoInfo{ID: fields[0], Channel: fields[1], Duration: fields[2], Title: fields[3]}
+}
+
+// durationMS is the video's length as yt-dlp reported it. False when it didn't
+// report one - "NA" for a live stream, say - which is not the same as a zero
+// length and must not be compared as one.
+func (info videoInfo) durationMS() (int, bool) {
+	seconds, err := strconv.ParseFloat(info.Duration, 64)
+	if err != nil || seconds <= 0 {
+		return 0, false
+	}
+
+	return int(seconds * 1000), true
 }
 
 // candidate is one search's download, before deciding whether to keep it.
@@ -179,7 +198,10 @@ func NewAudioDownloader(outputDir string, ytdlpPath string) (*AudioDownloader, e
 // ytdlpArgs assembles the command line for one download. Split out from
 // DownloadBestAudio so the conditional flags can be asserted without running
 // anything.
-func ytdlpArgs(outputPath, query, jsRuntime, infoPath string, useCookies bool) []string {
+//
+// target is what to download: "ytsearch:<query>" for a search's first result,
+// or a watch URL for one exact video the deeper pick chose from a listing.
+func ytdlpArgs(outputPath, target, jsRuntime, infoPath string, useCookies bool) []string {
 	args := []string{
 		// The "/" is a fallback: best audio-only stream, or failing that the
 		// best anything. Some videos only offer formats behind a PO token, and
@@ -215,7 +237,38 @@ func ytdlpArgs(outputPath, query, jsRuntime, infoPath string, useCookies bool) [
 		args = append(args, "--print-to-file", videoInfoTemplate, infoPath)
 	}
 
-	return append(args, "ytsearch:"+query)
+	return append(args, target)
+}
+
+// listArgs lists a search's first count results without downloading any of
+// them. --flat-playlist reads the results page and stops there, so this costs
+// a second or two rather than a download per result.
+//
+// It prints the same fields a download records, so parseVideoInfo reads both,
+// minus "after_move", which only means something for a real download.
+func listArgs(query string, count int) []string {
+	return []string{
+		"--flat-playlist",
+		"--print", strings.TrimPrefix(videoInfoTemplate, "after_move:"),
+		fmt.Sprintf("ytsearch%d:%s", count, query),
+	}
+}
+
+// listResults runs listArgs and parses one videoInfo per line.
+func (d *AudioDownloader) listResults(query string, count int) ([]videoInfo, error) {
+	output, err := exec.Command(d.YtdlpPath, listArgs(query, count)...).Output()
+	if err != nil {
+		return nil, fmt.Errorf("listing results for %q: %w", query, err)
+	}
+
+	var results []videoInfo
+	for _, line := range strings.Split(string(output), "\n") {
+		if info := parseVideoInfo(line); info.ID != "" {
+			results = append(results, info)
+		}
+	}
+
+	return results, nil
 }
 
 // findExistingTracks lists every mp3 under root, at any depth, keyed by
@@ -308,8 +361,12 @@ func (d *AudioDownloader) RefreshExisting(req Request, retag bool) (bool, error)
 	return true, nil
 }
 
-// fetch runs one search and downloads its first result to outBase + ".mp3".
-func (d *AudioDownloader) fetch(outBase, query string) (candidate, error) {
+// fetch downloads target - a search's first result, or one exact video - to
+// outBase + ".mp3".
+func (d *AudioDownloader) fetch(outBase, target string) (candidate, error) {
+	// For messages and the log: the search as typed, or the URL.
+	query := strings.TrimPrefix(target, "ytsearch:")
+
 	// Failing to make the temp file only costs the title checks, so the error
 	// is deliberately ignored - infoPath stays empty and the flag is skipped.
 	infoPath := ""
@@ -319,7 +376,7 @@ func (d *AudioDownloader) fetch(outBase, query string) (candidate, error) {
 		defer os.Remove(infoPath)
 	}
 
-	cmd := exec.Command(d.YtdlpPath, ytdlpArgs(outBase, query, d.jsRuntime, infoPath, d.useCookies)...)
+	cmd := exec.Command(d.YtdlpPath, ytdlpArgs(outBase, target, d.jsRuntime, infoPath, d.useCookies)...)
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -357,7 +414,12 @@ func (d *AudioDownloader) DownloadBestAudio(req Request) (err error) {
 	pickedIndex, firstFoundIndex := -1, -1
 	var firstErr error
 
-	for index, query := range append([]string{req.Query}, req.FallbackQueries...) {
+	// Every video already downloaded, so the deeper pick doesn't fetch one of
+	// them a second time.
+	tried := map[string]bool{}
+
+	queries := append([]string{req.Query}, req.FallbackQueries...)
+	for index, query := range queries {
 		// Retries land beside the first attempt rather than on top of it, since
 		// --no-overwrites would otherwise refuse, and the first attempt is still
 		// the best guess if nothing better turns up.
@@ -366,7 +428,7 @@ func (d *AudioDownloader) DownloadBestAudio(req Request) (err error) {
 			outBase = fmt.Sprintf("%s.try%d", base, index+1)
 		}
 
-		found, fetchErr := d.fetch(outBase, query)
+		found, fetchErr := d.fetch(outBase, "ytsearch:"+query)
 		if fetchErr != nil {
 			selection.attempt(index, query, videoInfo{}, fetchErr, "") // TEMP(selection-log)
 			if firstErr == nil {
@@ -378,6 +440,8 @@ func (d *AudioDownloader) DownloadBestAudio(req Request) (err error) {
 			}
 			continue
 		}
+
+		tried[found.info.ID] = true
 
 		titleOK := titleMatches(req.Tags.Title, found.info.Title)
 		artistOK := artistMatches(req.Artists, found.info.Title, found.info.Channel)
@@ -412,6 +476,18 @@ func (d *AudioDownloader) DownloadBestAudio(req Request) (err error) {
 	}
 
 	selection.keep(pickedIndex, picked.info) // TEMP(selection-log)
+
+	// What was picked would be flagged - a different song, a different
+	// version, or the wrong length. The right one is often a little further
+	// down the same search, so look there before settling.
+	if songMismatch || d.wouldBeFlagged(req, *picked) {
+		if better := d.deeperPick(req, base, searchOrder(picked.query, queries), tried, selection); better != nil {
+			os.Remove(picked.path)
+			picked = better
+			songMismatch = false
+			selection.keepDeeper(picked.info) // TEMP(selection-log)
+		}
+	}
 
 	if picked.path != downloadedPath {
 		// Rename replaces an existing file on every platform, so a wrong first
@@ -463,6 +539,123 @@ func (d *AudioDownloader) DownloadBestAudio(req Request) (err error) {
 			time.Duration(req.DurationMS)*time.Millisecond,
 			time.Duration(actualMS)*time.Millisecond,
 		)
+	}
+
+	return nil
+}
+
+// deeperListSize is how far down each search the deeper pick looks. Both real
+// cases that prompted it had the right edit at result 2.
+const deeperListSize = 5
+
+// watchURL turns a video ID from a listing into something yt-dlp downloads as
+// exactly that video, rather than searching again.
+const watchURL = "https://www.youtube.com/watch?v="
+
+// wouldBeFlagged reports whether a download that passed the song and artist
+// checks would still be flagged: a different named version, or a length that
+// doesn't match Spotify. A length that can't be measured isn't a problem -
+// ffprobe being unavailable must never send every track down the deeper path.
+func (d *AudioDownloader) wouldBeFlagged(req Request, picked candidate) bool {
+	if picked.info.Title != "" && !versionMatches(req.Tags.Title, picked.info.Title) {
+		return true
+	}
+
+	actualMS, err := probeDurationMS(picked.path)
+	if err != nil {
+		return false
+	}
+
+	return !durationsMatch(req.DurationMS, actualMS)
+}
+
+// searchOrder puts the search that produced the pick first, then the rest in
+// their usual order. The pick's own search is the likeliest place for a better
+// edit of the same upload.
+func searchOrder(first string, queries []string) []string {
+	ordered := []string{first}
+	for _, query := range queries {
+		if query != first {
+			ordered = append(ordered, query)
+		}
+	}
+
+	return ordered
+}
+
+// isWanted reports whether a listed result would pass every check without being
+// downloaded first: the song and artist, the named version, and - when Spotify
+// gives one - the length. A result with no listed length can't be confirmed,
+// so it is passed over rather than gambled on.
+func isWanted(req Request, info videoInfo) bool {
+	if !titleMatches(req.Tags.Title, info.Title) ||
+		!artistMatches(req.Artists, info.Title, info.Channel) ||
+		!versionMatches(req.Tags.Title, info.Title) {
+		return false
+	}
+
+	if req.DurationMS <= 0 {
+		return true
+	}
+
+	listedMS, ok := info.durationMS()
+	return ok && durationsMatch(req.DurationMS, listedMS)
+}
+
+// deeperPick lists the top results of each search, without downloading them,
+// and downloads the first one that passes every check. Length only chooses
+// between results that already pass the song and artist checks - on its own it
+// says little, since a right song and a wrong one can be the same length.
+//
+// At most one extra download: the first wanted result is fetched and measured,
+// and if its real length doesn't match what the listing claimed, it is
+// discarded and nil returned rather than trying the next. A flagged track costs
+// a few listings and one download at worst, and a track that was right first
+// time never gets here.
+func (d *AudioDownloader) deeperPick(req Request, base string, queries []string, tried map[string]bool, selection *selectionRecord) *candidate {
+	for _, query := range queries {
+		results, err := d.listResults(query, deeperListSize)
+		if err != nil {
+			selection.note("deeper: listing %q failed: %s", query, oneLine(err)) // TEMP(selection-log)
+			continue
+		}
+
+		for position, info := range results {
+			if tried[info.ID] || !isWanted(req, info) {
+				continue
+			}
+
+			selection.note("deeper: %q #%d -> %s | %s | %ss | %s", query, position+1, // TEMP(selection-log)
+				info.Title, info.Channel, info.Duration, info.ID)
+
+			outBase := base + ".deeper"
+			os.Remove(outBase + ".mp3") // --no-overwrites would refuse a leftover
+
+			found, err := d.fetch(outBase, watchURL+info.ID)
+			if err != nil {
+				selection.note("deeper: download failed: %s", oneLine(err)) // TEMP(selection-log)
+				os.Remove(outBase + ".mp3")
+				return nil
+			}
+
+			// The listing's length is a claim; the file is the fact.
+			if actualMS, err := probeDurationMS(found.path); err == nil && !durationsMatch(req.DurationMS, actualMS) {
+				selection.note("deeper: measured %s, not the listed %ss - discarded", // TEMP(selection-log)
+					time.Duration(actualMS)*time.Millisecond, info.Duration)
+				os.Remove(found.path)
+				return nil
+			}
+
+			// The info file is the better record, but the listing will do when
+			// it couldn't be read.
+			if found.info.Title == "" {
+				found.info = info
+			}
+
+			return &found
+		}
+
+		selection.note("deeper: %q listed %d, none passed", query, len(results)) // TEMP(selection-log)
 	}
 
 	return nil
