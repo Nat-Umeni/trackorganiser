@@ -12,10 +12,11 @@ import (
 	"testing"
 )
 
-// searchResult is one video the fake yt-dlp "finds": its title and channel, the
-// audio to write if it is downloaded, and the length a listing claims for it.
-// The claimed length is separate from the audio's real length so a test can
-// make a listing lie, which the real one occasionally does.
+// searchResult is one video the fake yt-dlp "finds": its title and channel (the
+// uploader, on SoundCloud), the audio to write if it is downloaded, and the
+// length a listing claims for it. The claimed length is separate from the
+// audio's real length so a test can make a listing lie, which the real one
+// occasionally does - a SoundCloud preview is listed at full length.
 type searchResult struct {
 	title   string
 	channel string
@@ -23,12 +24,23 @@ type searchResult struct {
 	seconds int
 }
 
+// drmProtected, used as a result's fixture, makes downloading it fail the way
+// yt-dlp does on a protected SoundCloud track - before anything is fetched.
+const drmProtected = "DRM"
+
 // resultID gives each fake result a stable video ID, so a later "download this
 // exact video" call can be matched back to it.
 func resultID(query string, index int) string {
 	hash := fnv.New32a()
 	hash.Write([]byte(query))
 	return fmt.Sprintf("v%x%d", hash.Sum32(), index)
+}
+
+// soundcloudURL is the fake link a SoundCloud result is listed with and
+// downloaded by - deliberately nothing like a YouTube watch link, so code that
+// assumed one would ask for something the fake doesn't know.
+func soundcloudURL(query string, index int) string {
+	return "https://soundcloud.com/fake/" + resultID("sc "+query, index)
 }
 
 // audioFixture generates real audio of the given length with ffmpeg. The length
@@ -47,20 +59,23 @@ func audioFixture(t *testing.T, seconds int) string {
 }
 
 // fakeSearchingYtdlp writes a yt-dlp stand-in that knows a list of results per
-// search, and answers the three kinds of call the downloader makes, matched on
-// the exact target - always the last argument:
+// search, on YouTube and SoundCloud, and answers every kind of call the
+// downloader makes, matched on the exact target - always the last argument:
 //
-//	ytsearch:<query>       download result 1: copy its audio to --output and
-//	                       write its info line where --print-to-file asks
-//	ytsearchN:<query>      list every result's info line on stdout, as
-//	                       --flat-playlist does, downloading nothing (N is
-//	                       deeperListSize - see listPrefix)
-//	https://...watch?v=ID  download that one result
+//	ytsearch:<query>          download YouTube result 1: copy its audio to
+//	                          --output, write its info line where
+//	                          --print-to-file asks
+//	ytsearchN:<query>         list YouTube results on stdout, as
+//	                          --flat-playlist does (N is deeperListSize)
+//	scsearchN:<query>         the same for SoundCloud
+//	https://...watch?v=ID     download that YouTube result
+//	https://soundcloud.com/…  download that SoundCloud result - or fail as
+//	                          DRM-protected, if it's marked so
 //
 // Anything else finds nothing: exit 0, no file - the real yt-dlp's behaviour for
 // a search with no results. Every call's target is appended to the returned
 // calls file, so a test can check exactly what ran.
-func fakeSearchingYtdlp(t *testing.T, results map[string][]searchResult) (script, calls string) {
+func fakeSearchingYtdlp(t *testing.T, results, soundcloud map[string][]searchResult) (script, calls string) {
 	t.Helper()
 
 	if runtime.GOOS == "windows" {
@@ -88,36 +103,57 @@ done
 	body.WriteString(`dest="${out%.%(ext)s}.mp3"` + "\n")
 	body.WriteString(`case "$target" in` + "\n")
 
-	infoLine := func(query string, index int, result searchResult) string {
-		return fmt.Sprintf("%s\\t%s\\t%d\\t%s", resultID(query, index), result.channel, result.seconds, result.title)
-	}
+	// One site's worth of branches: listing, downloading by link, and - for
+	// YouTube - downloading a search's first result.
+	addSite := func(listing string, link func(query string, index int) string, id func(query string, index int) string,
+		searchDownload bool, results map[string][]searchResult) {
 
-	for query, list := range results {
-		if len(list) == 0 {
-			continue
+		infoLine := func(query string, index int, result searchResult) string {
+			return fmt.Sprintf("%s\\t%s\\t%d\\t%s\\t%s", id(query, index), result.channel, result.seconds,
+				link(query, index), result.title)
 		}
 
-		// Download result 1.
-		fmt.Fprintf(&body, "\t'ytsearch:%s') cp '%s' \"$dest\"; printf '%s\\n' > \"$info\" ;;\n",
-			query, list[0].fixture, infoLine(query, 0, list[0]))
-
-		// List them - but no more than the listing asks for, as the real
-		// ytsearchN does, so a result past the depth is genuinely out of reach.
-		fmt.Fprintf(&body, "\t'%s%s') printf '", listPrefix(), query)
-		for index, result := range list {
-			if index >= deeperListSize {
-				break
+		download := func(query string, index int, result searchResult) string {
+			if result.fixture == drmProtected {
+				return fmt.Sprintf("echo 'ERROR: [soundcloud] %s: This video is DRM protected' >&2; exit 1", id(query, index))
 			}
-			fmt.Fprintf(&body, "%s\\n", infoLine(query, index, result))
+			return fmt.Sprintf("cp '%s' \"$dest\"; printf '%s\\n' > \"$info\"", result.fixture, infoLine(query, index, result))
 		}
-		body.WriteString("' ;;\n")
 
-		// Download any one of them by URL.
-		for index, result := range list {
-			fmt.Fprintf(&body, "\t'https://www.youtube.com/watch?v=%s') cp '%s' \"$dest\"; printf '%s\\n' > \"$info\" ;;\n",
-				resultID(query, index), result.fixture, infoLine(query, index, result))
+		for query, list := range results {
+			if len(list) == 0 {
+				continue
+			}
+
+			if searchDownload {
+				fmt.Fprintf(&body, "\t'ytsearch:%s') %s ;;\n", query, download(query, 0, list[0]))
+			}
+
+			// List them - but no more than the listing asks for, as the real
+			// one does, so a result past the depth is genuinely out of reach.
+			fmt.Fprintf(&body, "\t'%s%s') printf '", listing, query)
+			for index, result := range list {
+				if index >= deeperListSize {
+					break
+				}
+				fmt.Fprintf(&body, "%s\\n", infoLine(query, index, result))
+			}
+			body.WriteString("' ;;\n")
+
+			for index, result := range list {
+				fmt.Fprintf(&body, "\t'%s') %s ;;\n", link(query, index), download(query, index, result))
+			}
 		}
 	}
+
+	addSite(listPrefix(), func(query string, index int) string {
+		return "https://www.youtube.com/watch?v=" + resultID(query, index)
+	}, resultID, true, results)
+
+	addSite(scListPrefix(), soundcloudURL, func(query string, index int) string {
+		return resultID("sc "+query, index)
+	}, false, soundcloud)
+
 	body.WriteString("esac\nexit 0\n")
 
 	script = filepath.Join(dir, "yt-dlp-searching")
@@ -213,12 +249,13 @@ func TestDownloadBestAudioRetries(t *testing.T) {
 	)
 
 	tests := []struct {
-		name      string
-		results   map[string][]searchResult
-		fallbacks []string
-		wantErr   error
-		wantMS    int
-		wantCalls int
+		name       string
+		results    map[string][]searchResult
+		soundcloud map[string][]searchResult
+		fallbacks  []string
+		wantErr    error
+		wantMS     int
+		wantCalls  int
 	}{
 		{
 			// The usual case, and the one that must cost nothing extra.
@@ -250,7 +287,7 @@ func TestDownloadBestAudioRetries(t *testing.T) {
 			fallbacks: []string{fallbackQuery},
 			wantErr:   ErrSongMismatch,
 			wantMS:    0,
-			wantCalls: 4,
+			wantCalls: 5,
 		},
 		{
 			// The fallbacks also give a track the first search couldn't find at
@@ -289,7 +326,7 @@ func TestDownloadBestAudioRetries(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			script, calls := fakeSearchingYtdlp(t, test.results)
+			script, calls := fakeSearchingYtdlp(t, test.results, test.soundcloud)
 			outputDir := t.TempDir()
 			dl := &AudioDownloader{OutputDir: outputDir, YtdlpPath: script}
 
@@ -341,12 +378,13 @@ func TestDownloadBestAudioLooksDeeper(t *testing.T) {
 	deepList = append(deepList, searchResult{"Easy", "Nokaut - Topic", long, 10})
 
 	tests := []struct {
-		name      string
-		results   map[string][]searchResult
-		fallbacks []string
-		wantErr   error
-		wantMS    int
-		wantCalls []string
+		name       string
+		results    map[string][]searchResult
+		soundcloud map[string][]searchResult
+		fallbacks  []string
+		wantErr    error
+		wantMS     int
+		wantCalls  []string
 	}{
 		{
 			name: "the right edit is result 2",
@@ -389,6 +427,7 @@ func TestDownloadBestAudioLooksDeeper(t *testing.T) {
 				"ytsearch:" + topicQuery,
 				listPrefix() + topicQuery,
 				listPrefix() + fallbackQuery,
+				scListPrefix() + fallbackQuery,
 			},
 		},
 		{
@@ -406,6 +445,7 @@ func TestDownloadBestAudioLooksDeeper(t *testing.T) {
 			wantCalls: []string{
 				"ytsearch:" + topicQuery,
 				listPrefix() + topicQuery,
+				scListPrefix() + fallbackQuery,
 			},
 		},
 		{
@@ -422,6 +462,7 @@ func TestDownloadBestAudioLooksDeeper(t *testing.T) {
 				"ytsearch:" + topicQuery,
 				listPrefix() + topicQuery,
 				"https://www.youtube.com/watch?v=" + resultID(topicQuery, 1),
+				scListPrefix() + fallbackQuery,
 			},
 		},
 		{
@@ -485,6 +526,7 @@ func TestDownloadBestAudioLooksDeeper(t *testing.T) {
 				"ytsearch:" + topicQuery,
 				listPrefix() + topicQuery,
 				"https://www.youtube.com/watch?v=" + resultID(topicQuery, 1),
+				scListPrefix() + fallbackQuery,
 			},
 		},
 		{
@@ -498,7 +540,7 @@ func TestDownloadBestAudioLooksDeeper(t *testing.T) {
 			results:   map[string][]searchResult{topicQuery: {{"Easy", "DiEM ARCHiVE", short, 2}}},
 			wantErr:   ErrArtistUnconfirmed,
 			wantMS:    2000,
-			wantCalls: []string{"ytsearch:" + topicQuery, listPrefix() + topicQuery},
+			wantCalls: []string{"ytsearch:" + topicQuery, listPrefix() + topicQuery, scListPrefix() + fallbackQuery},
 		},
 		{
 			// When one search found the right title and another found nothing
@@ -517,6 +559,7 @@ func TestDownloadBestAudioLooksDeeper(t *testing.T) {
 				"ytsearch:" + fallbackQuery,
 				listPrefix() + fallbackQuery,
 				listPrefix() + topicQuery,
+				scListPrefix() + fallbackQuery,
 			},
 		},
 		{
@@ -544,11 +587,88 @@ func TestDownloadBestAudioLooksDeeper(t *testing.T) {
 				"https://www.youtube.com/watch?v=" + resultID(topicQuery, 1),
 			},
 		},
+
+		// SoundCloud: the last resort, for a track YouTube can't satisfy. From
+		// a real run, "Talk To You (Xav Funky Remix)" was only ever on Xav's
+		// own SoundCloud. It's searched without "topic", which means nothing
+		// there and found nothing for "I Remember".
+		{
+			name:       "only on soundcloud",
+			results:    map[string][]searchResult{topicQuery: {{"Snow on The Bluff", "evening elephants", short, 2}}},
+			soundcloud: map[string][]searchResult{fallbackQuery: {{"Nokaut - Easy", "Nokaut", long, 10}}},
+			wantMS:     10000,
+			wantCalls: []string{
+				"ytsearch:" + topicQuery,
+				listPrefix() + topicQuery,
+				scListPrefix() + fallbackQuery,
+				soundcloudURL(fallbackQuery, 0),
+			},
+		},
+		{
+			// YouTube has nothing at all - which used to end the track before
+			// any second look.
+			name:       "youtube finds nothing, soundcloud has it",
+			soundcloud: map[string][]searchResult{fallbackQuery: {{"Nokaut - Easy", "Nokaut", long, 10}}},
+			wantMS:     10000,
+			wantCalls: []string{
+				"ytsearch:" + topicQuery,
+				scListPrefix() + fallbackQuery,
+				soundcloudURL(fallbackQuery, 0),
+			},
+		},
+		{
+			// Label releases on SoundCloud are DRM-protected and refused -
+			// never worked around. The refusal costs nothing, so the next
+			// result that passes gets its turn.
+			name:    "drm-protected result skipped for the next",
+			results: map[string][]searchResult{topicQuery: {{"Snow on The Bluff", "evening elephants", short, 2}}},
+			soundcloud: map[string][]searchResult{fallbackQuery: {
+				{"Easy", "Nokaut", drmProtected, 10},
+				{"Nokaut - Easy (Original Mix)", "Nokaut", long, 10},
+			}},
+			wantMS: 10000,
+			wantCalls: []string{
+				"ytsearch:" + topicQuery,
+				listPrefix() + topicQuery,
+				scListPrefix() + fallbackQuery,
+				soundcloudURL(fallbackQuery, 0),
+				soundcloudURL(fallbackQuery, 1),
+			},
+		},
+		{
+			// SoundCloud gets exactly the same checks: nobody credited, and the
+			// length too far out to stand in. Not chosen.
+			name:       "soundcloud result fails the checks",
+			results:    map[string][]searchResult{topicQuery: {{"Snow on The Bluff", "evening elephants", short, 2}}},
+			soundcloud: map[string][]searchResult{fallbackQuery: {{"Easy", "Someone Else", long, 20}}},
+			wantErr:    ErrSongMismatch,
+			wantMS:     0,
+			wantCalls: []string{
+				"ytsearch:" + topicQuery,
+				listPrefix() + topicQuery,
+				scListPrefix() + fallbackQuery,
+			},
+		},
+		{
+			// A track only playable to subscribers is a 30-second preview to
+			// everyone else, listed at full length. Measured, not trusted.
+			name:       "soundcloud preview discarded",
+			results:    map[string][]searchResult{topicQuery: {{"Snow on The Bluff", "evening elephants", short, 2}}},
+			soundcloud: map[string][]searchResult{fallbackQuery: {{"Nokaut - Easy", "Nokaut", short, 10}}},
+			wantErr:    ErrSongMismatch,
+			wantMS:     0,
+			wantCalls: []string{
+				"ytsearch:" + topicQuery,
+				listPrefix() + topicQuery,
+				scListPrefix() + fallbackQuery,
+				soundcloudURL(fallbackQuery, 0),
+			},
+		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			script, calls := fakeSearchingYtdlp(t, test.results)
+			script, calls := fakeSearchingYtdlp(t, test.results, test.soundcloud)
 			outputDir := t.TempDir()
 			dl := &AudioDownloader{OutputDir: outputDir, YtdlpPath: script}
 
@@ -575,7 +695,7 @@ func TestDownloadBestAudioLooksDeeper(t *testing.T) {
 func TestDownloadBestAudioNamesBothTitlesOnASongMismatch(t *testing.T) {
 	script, _ := fakeSearchingYtdlp(t, map[string][]searchResult{
 		"I Feel So Good Bluff topic": {{"Snow on The Bluff", "evening elephants", audioFixture(t, 2), 2}},
-	})
+	}, nil)
 	dl := &AudioDownloader{OutputDir: t.TempDir(), YtdlpPath: script}
 
 	err := dl.DownloadBestAudio(Request{
@@ -602,4 +722,82 @@ func TestDownloadBestAudioNamesBothTitlesOnASongMismatch(t *testing.T) {
 // constant itself so the fake and the code can't disagree about the depth.
 func listPrefix() string {
 	return fmt.Sprintf("ytsearch%d:", deeperListSize)
+}
+
+// scListPrefix is the target prefix of a SoundCloud listing, from the same
+// constant as listPrefix.
+func scListPrefix() string {
+	return fmt.Sprintf("scsearch%d:", deeperListSize)
+}
+
+// From a real run: "Bounce" by bullet tooth is on the artist's SoundCloud, but
+// DRM-protected - the program never works around that. What it can do is say
+// so, with the exact filename to save a bought copy as: the next run then finds
+// it with Has() and tags it, like any track already downloaded.
+func TestDownloadBestAudioReportsDRM(t *testing.T) {
+	script, _ := fakeSearchingYtdlp(t,
+		map[string][]searchResult{"Easy Nokaut topic": {{"Snow on The Bluff", "evening elephants", audioFixture(t, 2), 2}}},
+		map[string][]searchResult{"Easy Nokaut": {{"Easy", "Nokaut", drmProtected, 10}}},
+	)
+	outputDir := t.TempDir()
+	dl := &AudioDownloader{OutputDir: outputDir, YtdlpPath: script}
+
+	err := dl.DownloadBestAudio(Request{
+		Query:      "Easy Nokaut topic",
+		Artists:    []string{"Nokaut"},
+		FileName:   "Easy - Nokaut",
+		Tags:       Tags{Title: "Easy", Artist: "Nokaut"},
+		DurationMS: 10000,
+	})
+
+	// Still the same outcome as any song not found...
+	if !errors.Is(err, ErrSongMismatch) {
+		t.Fatalf("error = %v, want ErrSongMismatch", err)
+	}
+
+	// ...but saying where it is, and what to do about it.
+	for _, want := range []string{"DRM", `"Easy - Nokaut.mp3"`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q doesn't mention %s", err, want)
+		}
+	}
+
+	assertKept(t, outputDir, "Easy - Nokaut", 0)
+}
+
+// From a real run: the same DRM-protected "Bounce" came up in two different
+// searches' listings, and was refused twice. A refused result is remembered as
+// tried, so a later listing doesn't ask for it again.
+func TestDownloadBestAudioDoesNotRetryARefusedResult(t *testing.T) {
+	const (
+		topicQuery    = "Easy Nokaut topic"
+		fallbackQuery = "Easy Nokaut"
+	)
+
+	script, calls := fakeSearchingYtdlp(t,
+		map[string][]searchResult{topicQuery: {{"Snow on The Bluff", "evening elephants", audioFixture(t, 2), 2}}},
+		map[string][]searchResult{fallbackQuery: {{"Easy", "Nokaut", drmProtected, 10}}},
+	)
+	dl := &AudioDownloader{OutputDir: t.TempDir(), YtdlpPath: script}
+
+	// The same search twice gives the same listing twice - the same result
+	// under the same ID, as two overlapping real searches do.
+	_ = dl.DownloadBestAudio(Request{
+		Query:           topicQuery,
+		FallbackQueries: []string{fallbackQuery, fallbackQuery},
+		Artists:         []string{"Nokaut"},
+		FileName:        "Easy - Nokaut",
+		Tags:            Tags{Title: "Easy", Artist: "Nokaut"},
+		DurationMS:      10000,
+	})
+
+	attempts := 0
+	for _, call := range readCalls(t, calls) {
+		if call == soundcloudURL(fallbackQuery, 0) {
+			attempts++
+		}
+	}
+	if attempts != 1 {
+		t.Errorf("the refused result was downloaded %d times, want once", attempts)
+	}
 }

@@ -46,16 +46,35 @@ var ErrNoResults = errors.New("no YouTube results")
 // separated, with the title last, so a title containing anything at all still
 // parses. "after_move" matters: --print implies --simulate unless a later stage
 // is named, and simulating would download nothing.
-const videoInfoTemplate = "after_move:%(id)s\t%(channel)s\t%(duration)s\t%(title)s"
+//
+// %(channel,uploader)s takes the channel, or the uploader when there is none:
+// SoundCloud has no channels, and its uploader is the artist's own account.
+// %(webpage_url)s is a link yt-dlp can download on either site.
+const videoInfoTemplate = "after_move:%(id)s\t%(channel,uploader)s\t%(duration)s\t%(webpage_url)s\t%(title)s"
+
+// videoInfoFields is how many tab-separated fields the template prints.
+const videoInfoFields = 5
 
 // videoInfo is what yt-dlp recorded about the video a search picked. The title
 // drives the song and version checks; the rest is there to make a wrong pick
-// traceable.
+// traceable, and the URL is how a result from a listing gets downloaded.
 type videoInfo struct {
 	ID       string
 	Channel  string
 	Duration string
+	URL      string
 	Title    string
+}
+
+// downloadTarget is what to hand yt-dlp to download exactly this result: its
+// own link, which differs between YouTube and SoundCloud. yt-dlp prints NA for
+// a field it doesn't have, and without a link a bare ID can only be YouTube's.
+func (info videoInfo) downloadTarget() string {
+	if info.URL != "" && info.URL != "NA" {
+		return info.URL
+	}
+
+	return watchURL + info.ID
 }
 
 // readVideoInfo returns what yt-dlp recorded, or a zero value if anything at all
@@ -80,12 +99,12 @@ func parseVideoInfo(line string) videoInfo {
 	line = strings.TrimSpace(line)
 
 	// SplitN, so tabs inside the title stay part of it.
-	fields := strings.SplitN(line, "\t", 4)
-	if len(fields) < 4 {
+	fields := strings.SplitN(line, "\t", videoInfoFields)
+	if len(fields) < videoInfoFields {
 		return videoInfo{Title: line}
 	}
 
-	return videoInfo{ID: fields[0], Channel: fields[1], Duration: fields[2], Title: fields[3]}
+	return videoInfo{ID: fields[0], Channel: fields[1], Duration: fields[2], URL: fields[3], Title: fields[4]}
 }
 
 // durationMS is the video's length as yt-dlp reported it. False when it didn't
@@ -258,17 +277,20 @@ func ytdlpArgs(outputPath, target, jsRuntime, infoPath string, useCookies bool) 
 //
 // It prints the same fields a download records, so parseVideoInfo reads both,
 // minus "after_move", which only means something for a real download.
-func listArgs(query string, count int) []string {
+//
+// site is yt-dlp's search prefix: "ytsearch" for YouTube, "scsearch" for
+// SoundCloud.
+func listArgs(site, query string, count int) []string {
 	return []string{
 		"--flat-playlist",
 		"--print", strings.TrimPrefix(videoInfoTemplate, "after_move:"),
-		fmt.Sprintf("ytsearch%d:%s", count, query),
+		fmt.Sprintf("%s%d:%s", site, count, query),
 	}
 }
 
 // listResults runs listArgs and parses one videoInfo per line.
-func (d *AudioDownloader) listResults(query string, count int) ([]videoInfo, error) {
-	output, err := exec.Command(d.YtdlpPath, listArgs(query, count)...).Output()
+func (d *AudioDownloader) listResults(site, query string, count int) ([]videoInfo, error) {
+	output, err := exec.Command(d.YtdlpPath, listArgs(site, query, count)...).Output()
 	if err != nil {
 		return nil, fmt.Errorf("listing results for %q: %w", query, err)
 	}
@@ -422,6 +444,18 @@ func (d *AudioDownloader) DownloadBestAudio(req Request) (err error) {
 	selection := newSelectionRecord(req)
 	defer func() { selection.finish(err) }()
 
+	// Set when the only SoundCloud match was DRM-protected. That is never
+	// worked around - the track's report says where it is and what to save a
+	// bought copy as, which the next run then adopts like any downloaded file.
+	// Registered after the log's defer, so it runs first and the log sees it.
+	drmBlocked := false
+	defer func() {
+		if err != nil && drmBlocked {
+			err = fmt.Errorf("%w - on SoundCloud, but DRM-protected: buy it and save it as %q in the playlist folder",
+				err, req.FileName+".mp3")
+		}
+	}()
+
 	var picked *candidate
 	pickedIndex := -1
 	var firstErr error
@@ -499,27 +533,45 @@ func (d *AudioDownloader) DownloadBestAudio(req Request) (err error) {
 	nothingPassed := false
 	switch {
 	case picked == nil && fallback == nil:
-		// Nothing downloaded at all. The first search's error is the one to
-		// report - it is the search the program normally runs.
-		return firstErr
+		// YouTube had nothing at all, so SoundCloud is the only place left to
+		// look. Failing that, the first search's error is the one to report -
+		// it is the search the program normally runs.
+		found, blocked := d.pickFromListings(req, base, soundcloudSearch, soundcloudQueries(req), tried, selection)
+		drmBlocked = blocked
+		if found == nil {
+			return firstErr
+		}
+		picked = found
+		selection.keepFrom("SoundCloud", picked.info) // TEMP(selection-log)
 	case picked == nil:
 		picked, pickedIndex = fallback, fallbackIndex
 		nothingPassed = true
-	case fallback != nil:
-		os.Remove(fallback.path)
+		selection.keep(pickedIndex, picked.info) // TEMP(selection-log)
+	default:
+		if fallback != nil {
+			os.Remove(fallback.path)
+		}
+		selection.keep(pickedIndex, picked.info) // TEMP(selection-log)
 	}
-
-	selection.keep(pickedIndex, picked.info) // TEMP(selection-log)
 
 	// What was picked would be flagged - a different song, a different
 	// version, or the wrong length. The right one is often a little further
-	// down the same search, so look there before settling.
+	// down the same search, so look there first; then, as a last resort, on
+	// SoundCloud, where artists' own remixes and bootlegs turn up that YouTube
+	// doesn't have.
 	if nothingPassed || d.wouldBeFlagged(req, *picked) {
-		if better := d.deeperPick(req, base, searchOrder(picked.query, queries), tried, selection); better != nil {
+		source := "the deeper pick"
+		better, _ := d.pickFromListings(req, base, youtubeSearch, searchOrder(picked.query, queries), tried, selection)
+		if better == nil {
+			source = "SoundCloud"
+			better, drmBlocked = d.pickFromListings(req, base, soundcloudSearch, soundcloudQueries(req), tried, selection)
+		}
+
+		if better != nil {
 			os.Remove(picked.path)
 			picked = better
 			nothingPassed = false
-			selection.keepDeeper(picked.info) // TEMP(selection-log)
+			selection.keepFrom(source, picked.info) // TEMP(selection-log)
 		}
 	}
 
@@ -657,21 +709,51 @@ func isWanted(req Request, info videoInfo) (wanted, viaStandIn bool) {
 	return listed && durationsMatch(req.DurationMS, listedMS), viaStandIn
 }
 
-// deeperPick lists the top results of each search, without downloading them,
-// and downloads the first one that passes every check. Length only chooses
-// between results that already pass the song and artist checks - on its own it
-// says little, since a right song and a wrong one can be the same length.
+// maxFailedDownloads is how many wanted results a listing may fail to download
+// before giving up on it. A refusal - DRM, a removed upload - fails before
+// anything is fetched, so moving on to the next is cheap.
+const maxFailedDownloads = 3
+
+// soundcloudSearch and youtubeSearch are yt-dlp's search prefixes.
+const (
+	youtubeSearch    = "ytsearch"
+	soundcloudSearch = "scsearch"
+)
+
+// soundcloudQueries are the searches tried on SoundCloud: the fallback
+// searches, which never say "topic" - a YouTube idea that, on SoundCloud,
+// found nothing for "I Remember". A request with no fallbacks uses its main
+// search with "topic" taken off.
+func soundcloudQueries(req Request) []string {
+	if len(req.FallbackQueries) > 0 {
+		return req.FallbackQueries
+	}
+
+	return []string{strings.TrimSuffix(req.Query, " topic")}
+}
+
+// pickFromListings lists the top results of each search on one site, without
+// downloading them, and downloads the first one that passes every check.
+// Length only chooses between results that already pass the song and artist
+// checks - on its own it says little, since a right song and a wrong one can be
+// the same length.
 //
 // At most one extra download: the first wanted result is fetched and measured,
 // and if its real length doesn't match what the listing claimed, it is
-// discarded and nil returned rather than trying the next. A flagged track costs
-// a few listings and one download at worst, and a track that was right first
-// time never gets here.
-func (d *AudioDownloader) deeperPick(req Request, base string, queries []string, tried map[string]bool, selection *selectionRecord) *candidate {
+// discarded and nil returned rather than trying the next. A download that
+// fails outright doesn't count - a DRM refusal on SoundCloud fails before
+// anything is fetched - so the next wanted result gets its turn, up to
+// maxFailedDownloads.
+//
+// drmBlocked reports that a wanted result was refused as DRM-protected, so
+// the caller can say where the track is. It is never worked around.
+func (d *AudioDownloader) pickFromListings(req Request, base, site string, queries []string, tried map[string]bool, selection *selectionRecord) (picked *candidate, drmBlocked bool) {
+	failed := 0
+
 	for _, query := range queries {
-		results, err := d.listResults(query, deeperListSize)
+		results, err := d.listResults(site, query, deeperListSize)
 		if err != nil {
-			selection.note("deeper: listing %q failed: %s", query, oneLine(err)) // TEMP(selection-log)
+			selection.note("%s: listing %q failed: %s", site, query, oneLine(err)) // TEMP(selection-log)
 			continue
 		}
 
@@ -685,17 +767,30 @@ func (d *AudioDownloader) deeperPick(req Request, base string, queries []string,
 				continue
 			}
 
-			selection.note("deeper: %q #%d -> %s | %s | %ss | %s", query, position+1, // TEMP(selection-log)
-				info.Title, info.Channel, info.Duration, info.ID)
+			selection.note("%s: %q #%d -> %s | %s | %ss | %s", site, query, position+1, // TEMP(selection-log)
+				info.Title, info.Channel, info.Duration, info.downloadTarget())
 
 			outBase := base + ".deeper"
 			os.Remove(outBase + ".mp3") // --no-overwrites would refuse a leftover
 
-			found, err := d.fetch(outBase, watchURL+info.ID)
+			// Tried now, whatever happens - so a result that turns up again in
+			// a later listing isn't asked for twice. A refusal won't change.
+			tried[info.ID] = true
+
+			found, err := d.fetch(outBase, info.downloadTarget())
 			if err != nil {
-				selection.note("deeper: download failed: %s", oneLine(err)) // TEMP(selection-log)
+				selection.note("%s: download failed: %s", site, oneLine(err)) // TEMP(selection-log)
 				os.Remove(outBase + ".mp3")
-				return nil
+
+				if strings.Contains(err.Error(), "DRM protected") {
+					drmBlocked = true
+				}
+
+				failed++
+				if failed >= maxFailedDownloads {
+					return nil, drmBlocked
+				}
+				continue
 			}
 
 			// The listing's length is a claim; the file is the fact. When the
@@ -707,10 +802,10 @@ func (d *AudioDownloader) deeperPick(req Request, base string, queries []string,
 			}
 
 			if actualMS, err := probeDurationMS(found.path); err == nil && !lengthOK(req.DurationMS, actualMS) {
-				selection.note("deeper: measured %s, not the listed %ss - discarded", // TEMP(selection-log)
+				selection.note("%s: measured %s, not the listed %ss - discarded", site, // TEMP(selection-log)
 					time.Duration(actualMS)*time.Millisecond, info.Duration)
 				os.Remove(found.path)
-				return nil
+				return nil, drmBlocked
 			}
 
 			// The info file is the better record, but the listing will do when
@@ -719,13 +814,13 @@ func (d *AudioDownloader) deeperPick(req Request, base string, queries []string,
 				found.info = info
 			}
 
-			return &found
+			return &found, drmBlocked
 		}
 
-		selection.note("deeper: %q listed %d, none passed", query, len(results)) // TEMP(selection-log)
+		selection.note("%s: %q listed %d, none passed", site, query, len(results)) // TEMP(selection-log)
 	}
 
-	return nil
+	return nil, drmBlocked
 }
 
 func (d *AudioDownloader) addTagsToFile(path string, tags Tags) error {

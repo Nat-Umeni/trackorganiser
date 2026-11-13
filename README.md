@@ -178,6 +178,13 @@ different search before giving up. Anything still suspicious is listed at the
 end of the run for you to check by ear. A song it can't find at all isn't saved -
 you won't get a different song in its place - and it tries again next run.
 
+**Some come from SoundCloud.** When YouTube doesn't have a track - often an
+artist's own remix or bootleg - it checks SoundCloud with the same care. Some
+SoundCloud tracks are copy-protected and can't be downloaded; the end of the run
+tells you which, and the filename to use. Buy the track (Bandcamp and Beatport
+usually sell a better-quality file than any stream), save it as an mp3 with that
+name in the playlist folder, and the next run tags it like the rest.
+
 **Nothing is ever deleted.** Removing a track from a playlist leaves the file
 alone, and deleting a file means it gets downloaded again next run.
 

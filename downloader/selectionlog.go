@@ -30,12 +30,12 @@ type selectionRecord struct {
 	kept     int
 	keptInfo videoInfo
 
-	// deeper is set when the kept download came from a listing rather than a
-	// search's first result.
-	deeper bool
+	// source is set when the kept download came from a listing rather than a
+	// search's first result: "the deeper pick", or "SoundCloud".
+	source string
 }
 
-// note adds a free-form line - the deeper pick's listings use it.
+// note adds a free-form line - the listings use it.
 func (r *selectionRecord) note(format string, args ...any) {
 	if r == nil {
 		return
@@ -51,16 +51,16 @@ func (r *selectionRecord) discard() {
 	}
 
 	r.kept = -1
-	r.deeper = false
+	r.source = ""
 }
 
-// keepDeeper records that a result from a listing replaced the first pick.
-func (r *selectionRecord) keepDeeper(info videoInfo) {
+// keepFrom records that a result from a listing replaced the first pick.
+func (r *selectionRecord) keepFrom(source string, info videoInfo) {
 	if r == nil {
 		return
 	}
 
-	r.deeper = true
+	r.source = source
 	r.keptInfo = info
 }
 
@@ -132,8 +132,8 @@ func (r *selectionRecord) finish(err error) {
 	}
 
 	switch {
-	case r.deeper:
-		fmt.Fprintf(&r.builder, "  kept the deeper pick   result: %s\n\n", result)
+	case r.source != "":
+		fmt.Fprintf(&r.builder, "  kept from %s   result: %s\n\n", r.source, result)
 	case r.kept >= 0:
 		fmt.Fprintf(&r.builder, "  kept #%d   result: %s\n\n", r.kept+1, result)
 	default:
@@ -145,7 +145,10 @@ func (r *selectionRecord) finish(err error) {
 	selectionLogLock.Unlock()
 
 	switch {
-	case r.deeper:
+	case r.source == "SoundCloud":
+		fmt.Printf("Found it on SoundCloud for %s: %q (%s)\n",
+			r.fileName, r.keptInfo.Title, r.keptInfo.Channel)
+	case r.source != "":
 		fmt.Printf("Found a closer match for %s: %q (%s)\n",
 			r.fileName, r.keptInfo.Title, r.keptInfo.Channel)
 	case r.kept > 0:

@@ -360,7 +360,7 @@ func TestYtdlpArgsWithAVideoURL(t *testing.T) {
 }
 
 func TestListArgs(t *testing.T) {
-	args := listArgs(`Easy "Nokaut" topic`, 5)
+	args := listArgs("ytsearch", `Easy "Nokaut" topic`, 5)
 	joined := strings.Join(args, " ")
 
 	// --flat-playlist is what makes this a listing: it reads the results page
@@ -386,6 +386,23 @@ func TestListArgs(t *testing.T) {
 
 	if last := args[len(args)-1]; last != `ytsearch5:Easy "Nokaut" topic` {
 		t.Errorf("last arg is %q, want a 5-result search", last)
+	}
+
+	// The print template must name the uploader as well as the channel -
+	// SoundCloud has no channel - and keep each result's own link.
+	template := strings.TrimPrefix(videoInfoTemplate, "after_move:")
+	for _, field := range []string{"%(channel,uploader)s", "%(webpage_url)s"} {
+		if !strings.Contains(template, field) {
+			t.Errorf("template %q doesn't print %s", template, field)
+		}
+	}
+}
+
+// The same listing, searched on SoundCloud instead.
+func TestListArgsOnSoundCloud(t *testing.T) {
+	args := listArgs("scsearch", `Talk To You - Funky Remix "Xav"`, 20)
+	if last := args[len(args)-1]; last != `scsearch20:Talk To You - Funky Remix "Xav"` {
+		t.Errorf("last arg is %q, want a 20-result SoundCloud search", last)
 	}
 }
 

@@ -219,10 +219,10 @@ func TestReadVideoInfo(t *testing.T) {
 	}
 
 	// What yt-dlp writes for videoInfoTemplate, measured on the Bluff upload.
-	full := write("full", "LwjV4rKV1tU\tUKF\t148\tBluff - I Feel So Good\n")
+	full := write("full", "LwjV4rKV1tU\tUKF\t148\thttps://www.youtube.com/watch?v=LwjV4rKV1tU\tBluff - I Feel So Good\n")
 
-	// A title is free text. Only the first three tabs separate fields.
-	tabbed := write("tabbed", "abc\tSomeone\t200\tA\tTitle\tWith Tabs\n")
+	// A title is free text. Only the first four tabs separate fields.
+	tabbed := write("tabbed", "abc\tSomeone\t200\thttps://example.com/abc\tA\tTitle\tWith Tabs\n")
 
 	// An unexpected shape - an older template, or yt-dlp changing - still yields
 	// a usable title rather than nothing.
@@ -235,8 +235,10 @@ func TestReadVideoInfo(t *testing.T) {
 		path string
 		want videoInfo
 	}{
-		{name: "every field", path: full, want: videoInfo{ID: "LwjV4rKV1tU", Channel: "UKF", Duration: "148", Title: "Bluff - I Feel So Good"}},
-		{name: "tabs inside the title", path: tabbed, want: videoInfo{ID: "abc", Channel: "Someone", Duration: "200", Title: "A\tTitle\tWith Tabs"}},
+		{name: "every field", path: full, want: videoInfo{ID: "LwjV4rKV1tU", Channel: "UKF", Duration: "148",
+			URL: "https://www.youtube.com/watch?v=LwjV4rKV1tU", Title: "Bluff - I Feel So Good"}},
+		{name: "tabs inside the title", path: tabbed, want: videoInfo{ID: "abc", Channel: "Someone", Duration: "200",
+			URL: "https://example.com/abc", Title: "A\tTitle\tWith Tabs"}},
 		{name: "title only, trailing newline trimmed", path: titleOnly, want: videoInfo{Title: "Some Track (Remix)"}},
 		{name: "empty file", path: empty, want: videoInfo{}},
 
@@ -265,10 +267,18 @@ func TestParseVideoInfo(t *testing.T) {
 		want videoInfo
 	}{
 		// Measured: result 2 of the "Easy" search, the edit Spotify has.
-		{name: "every field", line: "abc123\tbreaksbeat5.0\t192\tNOKAUT - (Easy) - original mix ",
-			want: videoInfo{ID: "abc123", Channel: "breaksbeat5.0", Duration: "192", Title: "NOKAUT - (Easy) - original mix"}},
-		{name: "tabs inside the title", line: "abc\tSomeone\t200\tA\tB",
-			want: videoInfo{ID: "abc", Channel: "Someone", Duration: "200", Title: "A\tB"}},
+		{name: "every field", line: "nElXJx1PHi4\tbreaksbeat5.0\t192\thttps://www.youtube.com/watch?v=nElXJx1PHi4\tNOKAUT - (Easy) - original mix ",
+			want: videoInfo{ID: "nElXJx1PHi4", Channel: "breaksbeat5.0", Duration: "192",
+				URL: "https://www.youtube.com/watch?v=nElXJx1PHi4", Title: "NOKAUT - (Easy) - original mix"}},
+
+		// Measured on SoundCloud: no channel, so %(channel,uploader)s gives the
+		// uploader - the artist's own account - and the duration is fractional.
+		{name: "soundcloud", line: "2314260431\tXav\t346.437\thttps://soundcloud.com/officialxav/anotr-talk-to-you-xav-funky\tANOTR - Talk To You (Xav Funky Remix)",
+			want: videoInfo{ID: "2314260431", Channel: "Xav", Duration: "346.437",
+				URL: "https://soundcloud.com/officialxav/anotr-talk-to-you-xav-funky", Title: "ANOTR - Talk To You (Xav Funky Remix)"}},
+
+		{name: "tabs inside the title", line: "abc\tSomeone\t200\thttps://example.com/abc\tA\tB",
+			want: videoInfo{ID: "abc", Channel: "Someone", Duration: "200", URL: "https://example.com/abc", Title: "A\tB"}},
 		{name: "title only", line: "Some Track", want: videoInfo{Title: "Some Track"}},
 		{name: "blank", line: "   ", want: videoInfo{}},
 	}
@@ -277,6 +287,34 @@ func TestParseVideoInfo(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			if got := parseVideoInfo(test.line); got != test.want {
 				t.Errorf("parseVideoInfo(%q) = %+v, want %+v", test.line, got, test.want)
+			}
+		})
+	}
+}
+
+// A listing's result is downloaded by its own link. YouTube's and SoundCloud's
+// differ, so assuming a YouTube watch link would fetch nothing for SoundCloud.
+func TestVideoInfoDownloadTarget(t *testing.T) {
+	tests := []struct {
+		name string
+		info videoInfo
+		want string
+	}{
+		{name: "soundcloud link", info: videoInfo{ID: "2314260431", URL: "https://soundcloud.com/officialxav/anotr-talk-to-you-xav-funky"},
+			want: "https://soundcloud.com/officialxav/anotr-talk-to-you-xav-funky"},
+		{name: "youtube link", info: videoInfo{ID: "nElXJx1PHi4", URL: "https://www.youtube.com/watch?v=nElXJx1PHi4"},
+			want: "https://www.youtube.com/watch?v=nElXJx1PHi4"},
+
+		// yt-dlp prints NA for a missing field. Without a link, a bare ID can
+		// only have come from YouTube.
+		{name: "no link recorded", info: videoInfo{ID: "abc123", URL: "NA"}, want: "https://www.youtube.com/watch?v=abc123"},
+		{name: "empty link", info: videoInfo{ID: "abc123"}, want: "https://www.youtube.com/watch?v=abc123"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := test.info.downloadTarget(); got != test.want {
+				t.Errorf("downloadTarget() = %q, want %q", got, test.want)
 			}
 		})
 	}
