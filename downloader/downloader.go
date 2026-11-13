@@ -24,20 +24,56 @@ var ErrDurationMismatch = errors.New("downloaded audio length does not match Spo
 // but the file is still kept for the caller to judge.
 var ErrVersionMismatch = errors.New("downloaded a different version")
 
-// readTitleFile returns what yt-dlp recorded, or an empty string if anything at
-// all went wrong. An unreadable title only means the version cannot be checked;
-// the mp3 is downloaded and tagged either way.
-func readTitleFile(path string) string {
+// ErrSongMismatch means every search came back with a title that doesn't contain
+// the song's name - most likely a different song altogether, not just a
+// different cut. The best guess is kept so the caller can report it.
+var ErrSongMismatch = errors.New("downloaded what looks like a different song")
+
+// videoInfoTemplate is what yt-dlp prints about the video it picked. Tab
+// separated, with the title last, so a title containing anything at all still
+// parses. "after_move" matters: --print implies --simulate unless a later stage
+// is named, and simulating would download nothing.
+const videoInfoTemplate = "after_move:%(id)s\t%(channel)s\t%(duration)s\t%(title)s"
+
+// videoInfo is what yt-dlp recorded about the video a search picked. The title
+// drives the song and version checks; the rest is there to make a wrong pick
+// traceable.
+type videoInfo struct {
+	ID       string
+	Channel  string
+	Duration string
+	Title    string
+}
+
+// readVideoInfo returns what yt-dlp recorded, or a zero value if anything at all
+// went wrong. An unreadable record only means the title can't be checked; the
+// mp3 is downloaded and tagged either way.
+func readVideoInfo(path string) videoInfo {
 	if path == "" {
-		return ""
+		return videoInfo{}
 	}
 
 	contents, err := os.ReadFile(path)
 	if err != nil {
-		return ""
+		return videoInfo{}
 	}
 
-	return strings.TrimSpace(string(contents))
+	line := strings.TrimSpace(string(contents))
+
+	// SplitN, so tabs inside the title stay part of it.
+	fields := strings.SplitN(line, "\t", 4)
+	if len(fields) < 4 {
+		return videoInfo{Title: line}
+	}
+
+	return videoInfo{ID: fields[0], Channel: fields[1], Duration: fields[2], Title: fields[3]}
+}
+
+// candidate is one search's download, before deciding whether to keep it.
+type candidate struct {
+	path  string
+	query string
+	info  videoInfo
 }
 
 type AudioDownloader struct {
@@ -70,7 +106,17 @@ type Tags struct {
 // rather than a parameter list because the list was already at three and each
 // new detail about a track would add another.
 type Request struct {
-	Query      string
+	Query string
+
+	// FallbackQueries are searched in order when Query's result has a title that
+	// doesn't contain the song's name. Empty means no second chance.
+	FallbackQueries []string
+
+	// Artists are every credited name, for checking that a result is by one of
+	// them. Separate from Tags.Artist, which is the same list joined for the
+	// tag and can't be split back reliably - a name can contain a comma.
+	Artists []string
+
 	FileName   string
 	Tags       Tags
 	DurationMS int
@@ -133,7 +179,7 @@ func NewAudioDownloader(outputDir string, ytdlpPath string) (*AudioDownloader, e
 // ytdlpArgs assembles the command line for one download. Split out from
 // DownloadBestAudio so the conditional flags can be asserted without running
 // anything.
-func ytdlpArgs(outputPath, query, jsRuntime, titlePath string, useCookies bool) []string {
+func ytdlpArgs(outputPath, query, jsRuntime, infoPath string, useCookies bool) []string {
 	args := []string{
 		// The "/" is a fallback: best audio-only stream, or failing that the
 		// best anything. Some videos only offer formats behind a PO token, and
@@ -159,15 +205,14 @@ func ytdlpArgs(outputPath, query, jsRuntime, titlePath string, useCookies bool) 
 		args = append(args, "--cookies-from-browser", "firefox")
 	}
 
-	// Records what yt-dlp actually picked, so the version can be checked against
-	// what Spotify asked for. "after_move" matters: --print implies --simulate
-	// unless a later stage is named, and simulating would download nothing.
+	// Records what yt-dlp actually picked, so the song and version can be checked
+	// against what Spotify asked for.
 	//
 	// The path is a temp file rather than one derived from the track name
 	// because this argument is parsed as an output template - a track called
 	// "100% Pure" would otherwise mangle it.
-	if titlePath != "" {
-		args = append(args, "--print-to-file", "after_move:%(title)s", titlePath)
+	if infoPath != "" {
+		args = append(args, "--print-to-file", videoInfoTemplate, infoPath)
 	}
 
 	return append(args, "ytsearch:"+query)
@@ -263,35 +308,118 @@ func (d *AudioDownloader) RefreshExisting(req Request, retag bool) (bool, error)
 	return true, nil
 }
 
-func (d *AudioDownloader) DownloadBestAudio(req Request) error {
-	filepathForDownloader := filepath.Join(d.OutputDir, req.FileName)
-
-	// Failing to make the temp file only costs the version check, so the error
-	// is deliberately ignored - titlePath stays empty and the flag is skipped.
-	titlePath := ""
-	if titleFile, err := os.CreateTemp("", "trackorganiser-title-*"); err == nil {
-		titlePath = titleFile.Name()
-		titleFile.Close()
-		defer os.Remove(titlePath)
+// fetch runs one search and downloads its first result to outBase + ".mp3".
+func (d *AudioDownloader) fetch(outBase, query string) (candidate, error) {
+	// Failing to make the temp file only costs the title checks, so the error
+	// is deliberately ignored - infoPath stays empty and the flag is skipped.
+	infoPath := ""
+	if infoFile, err := os.CreateTemp("", "trackorganiser-info-*"); err == nil {
+		infoPath = infoFile.Name()
+		infoFile.Close()
+		defer os.Remove(infoPath)
 	}
 
-	cmd := exec.Command(
-		d.YtdlpPath,
-		ytdlpArgs(filepathForDownloader, req.Query, d.jsRuntime, titlePath, d.useCookies)...,
-	)
+	cmd := exec.Command(d.YtdlpPath, ytdlpArgs(outBase, query, d.jsRuntime, infoPath, d.useCookies)...)
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("yt-dlp failed: %v\nOutput: %s", err, string(output))
+		return candidate{}, fmt.Errorf("yt-dlp failed: %v\nOutput: %s", err, string(output))
 	}
 
-	downloadedPath := filepathForDownloader + ".mp3"
+	path := outBase + ".mp3"
 
 	// A search with no results is not an error to yt-dlp: it exits 0 having
 	// downloaded nothing. Without this check addTagsToFile is the first thing to
 	// notice the missing file, so a normal not-found reads as a code defect.
-	if _, err := os.Stat(downloadedPath); err != nil {
-		return fmt.Errorf("no YouTube results for %q", req.Query)
+	if _, err := os.Stat(path); err != nil {
+		return candidate{}, fmt.Errorf("no YouTube results for %q", query)
+	}
+
+	return candidate{path: path, query: query, info: readVideoInfo(infoPath)}, nil
+}
+
+// DownloadBestAudio searches for the track, downloads it, and tags it.
+//
+// The first search ends in "topic", which finds the label's own upload when the
+// artist has a Topic channel - and finds something unrelated when they don't.
+// So when the result's title doesn't contain the song's name, the fallback
+// searches are tried in turn, and the first whose title does is kept. When the
+// first search is right, which is the usual case, nothing extra runs.
+func (d *AudioDownloader) DownloadBestAudio(req Request) (err error) {
+	base := filepath.Join(d.OutputDir, req.FileName)
+	downloadedPath := base + ".mp3"
+
+	// TEMP(selection-log)
+	selection := newSelectionRecord(req)
+	defer func() { selection.finish(err) }()
+
+	var picked, firstFound *candidate
+	pickedIndex, firstFoundIndex := -1, -1
+	var firstErr error
+
+	for index, query := range append([]string{req.Query}, req.FallbackQueries...) {
+		// Retries land beside the first attempt rather than on top of it, since
+		// --no-overwrites would otherwise refuse, and the first attempt is still
+		// the best guess if nothing better turns up.
+		outBase := base
+		if index > 0 {
+			outBase = fmt.Sprintf("%s.try%d", base, index+1)
+		}
+
+		found, fetchErr := d.fetch(outBase, query)
+		if fetchErr != nil {
+			selection.attempt(index, query, videoInfo{}, fetchErr, "") // TEMP(selection-log)
+			if firstErr == nil {
+				firstErr = fetchErr
+			}
+			if index > 0 {
+				// A failed retry may still have left something behind.
+				os.Remove(outBase + ".mp3")
+			}
+			continue
+		}
+
+		titleOK := titleMatches(req.Tags.Title, found.info.Title)
+		artistOK := artistMatches(req.Artists, found.info.Title, found.info.Channel)
+		matches := titleOK && artistOK
+		selection.attempt(index, query, found.info, nil, verdictFor(titleOK, artistOK)) // TEMP(selection-log)
+
+		if matches {
+			picked, pickedIndex = &found, index
+			break
+		}
+
+		// Wrong, but the first thing found stays the fallback - the "topic"
+		// search was measured to be the better one in general.
+		if firstFound == nil {
+			firstFound, firstFoundIndex = &found, index
+		} else {
+			os.Remove(found.path)
+		}
+	}
+
+	songMismatch := false
+	switch {
+	case picked == nil && firstFound == nil:
+		// Nothing downloaded at all. The first search's error is the one to
+		// report - it is the search the program normally runs.
+		return firstErr
+	case picked == nil:
+		picked, pickedIndex = firstFound, firstFoundIndex
+		songMismatch = true
+	case firstFound != nil:
+		os.Remove(firstFound.path)
+	}
+
+	selection.keep(pickedIndex, picked.info) // TEMP(selection-log)
+
+	if picked.path != downloadedPath {
+		// Rename replaces an existing file on every platform, so a wrong first
+		// attempt sitting at the final path is simply overwritten.
+		if err := os.Rename(picked.path, downloadedPath); err != nil {
+			os.Remove(picked.path)
+			return fmt.Errorf("keeping the result of %q: %w", picked.query, err)
+		}
 	}
 
 	if err := d.addTagsToFile(downloadedPath, req.Tags); err != nil {
@@ -307,10 +435,14 @@ func (d *AudioDownloader) DownloadBestAudio(req Request) error {
 		os.Chtimes(downloadedPath, req.AddedAt, req.AddedAt)
 	}
 
-	// Checked before the duration, because it is the more meaningful signal: a
-	// wrong remix is wrong, whereas a length difference is often just a radio
-	// edit that is perfectly usable.
-	if youtubeTitle := readTitleFile(titlePath); youtubeTitle != "" {
+	// The strongest signal first: a different song is wrong outright, a
+	// different remix nearly always is, whereas a length difference is often
+	// just a radio edit that is perfectly usable.
+	if songMismatch {
+		return fmt.Errorf("%w: wanted %q, got %q", ErrSongMismatch, req.Tags.Title, picked.info.Title)
+	}
+
+	if youtubeTitle := picked.info.Title; youtubeTitle != "" {
 		if !versionMatches(req.Tags.Title, youtubeTitle) {
 			return fmt.Errorf("%w: wanted %q, got %q", ErrVersionMismatch, req.Tags.Title, youtubeTitle)
 		}

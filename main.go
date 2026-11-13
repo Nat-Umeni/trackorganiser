@@ -302,6 +302,19 @@ func main() {
 		fmt.Printf("%s: %d of %d\n", cleanPlaylistName, len(tracks), currentPlaylist.Items.Total)
 	}
 
+	// TEMP(selection-log): records which YouTube result each download picked.
+	selectionLogPath := ""
+	if !dryRun {
+		if logFile, path, err := openSelectionLog(); err != nil {
+			fmt.Printf("Couldn't open the selection log: %v\n", err)
+		} else {
+			defer logFile.Close()
+			downloader.SelectionLog = logFile
+			selectionLogPath = path
+			fmt.Printf("Logging which YouTube result each download picks to %s\n", path)
+		}
+	}
+
 	// Collected across every playlist and printed at the end. An inline warning
 	// is lost among hundreds of tracks; a short list afterwards is actionable.
 	var mismatches []string
@@ -366,6 +379,35 @@ func main() {
 			fmt.Printf("  %s\n", mismatch)
 		}
 	}
+
+	// TEMP(selection-log)
+	if selectionLogPath != "" {
+		fmt.Printf("\nSelection log: %s\n", selectionLogPath)
+	}
+}
+
+// openSelectionLog creates a fresh log beside the cached yt-dlp, so each run's
+// log only holds that run.
+//
+// TEMP(selection-log): remove once the wrong-song retry is proven.
+func openSelectionLog() (*os.File, string, error) {
+	cacheDir, err := os.UserCacheDir()
+	if err != nil {
+		return nil, "", err
+	}
+
+	dir := filepath.Join(cacheDir, "trackorganiser")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil, "", err
+	}
+
+	path := filepath.Join(dir, "selection.log")
+	file, err := os.Create(path)
+	if err != nil {
+		return nil, "", err
+	}
+
+	return file, path, nil
 }
 
 // downloadTracks fetches up to jobs tracks at a time and returns a line for each
@@ -411,7 +453,8 @@ func downloadTracks(dl *downloader.AudioDownloader, tracks []spotify.Track, jobs
 			fmt.Printf("%d/%d - %s\n", completed.Add(1), len(tracks), track.FileName())
 
 			switch {
-			case errors.Is(err, downloader.ErrDurationMismatch),
+			case errors.Is(err, downloader.ErrSongMismatch),
+				errors.Is(err, downloader.ErrDurationMismatch),
 				errors.Is(err, downloader.ErrVersionMismatch):
 				// Not a failure - the file downloaded and was tagged. Keep it and
 				// flag it, because an extended mix or a live version is often
@@ -448,9 +491,16 @@ func clampJobs(n int) int {
 }
 
 func buildRequest(track spotify.Track) downloader.Request {
+	artists := make([]string, 0, len(track.Artists))
+	for _, artist := range track.Artists {
+		artists = append(artists, artist.Name)
+	}
+
 	return downloader.Request{
-		Query:    track.BuildSearchQuery(),
-		FileName: track.FileName(),
+		Query:           track.BuildSearchQuery(),
+		FallbackQueries: track.BuildFallbackQueries(),
+		Artists:         artists,
+		FileName:        track.FileName(),
 		Tags: downloader.Tags{
 			Artist:      track.JoinArtistNames(),
 			Title:       track.Name,

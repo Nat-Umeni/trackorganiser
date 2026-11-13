@@ -206,38 +206,51 @@ func TestVersionMatches(t *testing.T) {
 	}
 }
 
-func TestReadTitleFile(t *testing.T) {
+func TestReadVideoInfo(t *testing.T) {
 	dir := t.TempDir()
 
-	written := filepath.Join(dir, "title")
-	if err := os.WriteFile(written, []byte("Some Track (Remix)\n"), 0644); err != nil {
-		t.Fatalf("setting up: %v", err)
+	write := func(name, contents string) string {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(contents), 0644); err != nil {
+			t.Fatalf("setting up: %v", err)
+		}
+		return path
 	}
 
-	empty := filepath.Join(dir, "empty")
-	if err := os.WriteFile(empty, nil, 0644); err != nil {
-		t.Fatalf("setting up: %v", err)
-	}
+	// What yt-dlp writes for videoInfoTemplate, measured on the Bluff upload.
+	full := write("full", "LwjV4rKV1tU\tUKF\t148\tBluff - I Feel So Good\n")
+
+	// A title is free text. Only the first three tabs separate fields.
+	tabbed := write("tabbed", "abc\tSomeone\t200\tA\tTitle\tWith Tabs\n")
+
+	// An unexpected shape - an older template, or yt-dlp changing - still yields
+	// a usable title rather than nothing.
+	titleOnly := write("title-only", "Some Track (Remix)\n")
+
+	empty := write("empty", "")
 
 	tests := []struct {
 		name string
 		path string
-		want string
+		want videoInfo
 	}{
-		{name: "trailing newline is trimmed", path: written, want: "Some Track (Remix)"},
-		{name: "empty file", path: empty, want: ""},
+		{name: "every field", path: full, want: videoInfo{ID: "LwjV4rKV1tU", Channel: "UKF", Duration: "148", Title: "Bluff - I Feel So Good"}},
+		{name: "tabs inside the title", path: tabbed, want: videoInfo{ID: "abc", Channel: "Someone", Duration: "200", Title: "A\tTitle\tWith Tabs"}},
+		{name: "title only, trailing newline trimmed", path: titleOnly, want: videoInfo{Title: "Some Track (Remix)"}},
+		{name: "empty file", path: empty, want: videoInfo{}},
 
-		// All of these mean "cannot check the version", never "fail the
+		// All of these mean "cannot check the title", never "fail the
 		// download" - the mp3 is fine and tagged either way.
-		{name: "missing file", path: filepath.Join(dir, "nope"), want: ""},
-		{name: "empty path", path: "", want: ""},
-		{name: "path is a directory", path: dir, want: ""},
+		{name: "missing file", path: filepath.Join(dir, "nope"), want: videoInfo{}},
+		{name: "empty path", path: "", want: videoInfo{}},
+		{name: "path is a directory", path: dir, want: videoInfo{}},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := readTitleFile(test.path); got != test.want {
-				t.Errorf("readTitleFile(%q) = %q, want %q", test.path, got, test.want)
+			if got := readVideoInfo(test.path); got != test.want {
+				t.Errorf("readVideoInfo(%q) = %+v, want %+v", test.path, got, test.want)
 			}
 		})
 	}

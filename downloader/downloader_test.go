@@ -266,7 +266,7 @@ func TestYtdlpArgs(t *testing.T) {
 	tests := []struct {
 		name       string
 		jsRuntime  string
-		titlePath  string
+		infoPath   string
 		useCookies bool
 		wantFlags  []string
 		notWant    []string
@@ -279,9 +279,9 @@ func TestYtdlpArgs(t *testing.T) {
 		{
 			// "after_move" is what stops --print implying --simulate, which
 			// would download nothing at all.
-			name:      "title capture",
-			titlePath: "/tmp/some-title-file",
-			wantFlags: []string{"--print-to-file", "after_move:%(title)s", "/tmp/some-title-file"},
+			name:      "video info capture",
+			infoPath:  "/tmp/some-info-file",
+			wantFlags: []string{"--print-to-file", videoInfoTemplate, "/tmp/some-info-file"},
 		},
 		{
 			name:      "js runtime only",
@@ -300,19 +300,19 @@ func TestYtdlpArgs(t *testing.T) {
 			// is enough.
 			name:       "all three",
 			jsRuntime:  "deno",
-			titlePath:  "/tmp/t",
+			infoPath:   "/tmp/t",
 			useCookies: true,
 			wantFlags: []string{
 				"--js-runtimes", "deno",
 				"--cookies-from-browser", "firefox",
-				"--print-to-file", "after_move:%(title)s", "/tmp/t",
+				"--print-to-file", videoInfoTemplate, "/tmp/t",
 			},
 		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			args := ytdlpArgs(outputPath, query, test.jsRuntime, test.titlePath, test.useCookies)
+			args := ytdlpArgs(outputPath, query, test.jsRuntime, test.infoPath, test.useCookies)
 			joined := strings.Join(args, " ")
 
 			for _, flag := range test.wantFlags {
