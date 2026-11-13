@@ -119,7 +119,7 @@ or both:
 1-20,25    playlists 1 through 20, plus 25
 ```
 
-**Where to save them.** Press enter for `~/Downloads`, or type somewhere else.
+**Where to save them.** Press enter for the folder you used last time (`~/Downloads` the first time), or type somewhere else - it remembers whatever you pick.
 Each playlist becomes its own folder inside it, so choosing `~/Music` gives you
 `~/Music/Mix Potential`, `~/Music/Soul Food`, and so on.
 

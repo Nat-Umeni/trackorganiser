@@ -273,12 +273,13 @@ func main() {
 	}
 
 	// Grab the download path and verify it's reachable
-	downloadPathInput, downloadPathInputErr := readLine("\n\nWhat location would you like to save the downloads to? Default is ~/Downloads. \n")
+	downloadPathInput, downloadPathInputErr := readLine(downloadDirPrompt())
 	if downloadPathInputErr != nil {
 		log.Fatal("Failed to gather input on prefered download path: ", downloadPathInputErr)
 	}
 
-	downloadPath, err := ensureOutputLocationExists(downloadPathInput)
+	// Remembered for next time, unless this is only a dry run.
+	downloadPath, err := chooseDownloadDir(downloadPathInput, !dryRun)
 	switch {
 	case errors.Is(err, ErrDownloadDirDeclined):
 		fmt.Println("Nothing saved.")
@@ -633,14 +634,71 @@ func parseIndex(text string, max int) (int, error) {
 	return num - 1, nil
 }
 
+// downloadDirPrompt asks where to save, naming the actual default - otherwise
+// pressing enter would put the downloads somewhere the prompt never mentioned.
+func downloadDirPrompt() string {
+	defaultDir, err := defaultDownloadDir()
+	if err != nil {
+		defaultDir = "~/Downloads"
+	}
+
+	return fmt.Sprintf("\n\nWhat location would you like to save the downloads to? Default is %s\n", defaultDir)
+}
+
+// chooseDownloadDir resolves the folder to download to and, when remember is
+// set, saves it as next run's default. What's saved is the resolved absolute
+// path, so the default is exact however it was typed.
+//
+// Only a folder that was actually chosen is saved: a declined "create it?"
+// returns before saving, so last run's choice stands. The caller passes
+// remember=false on a dry run, which is for seeing what would happen, not for
+// changing anything.
+func chooseDownloadDir(input string, remember bool) (string, error) {
+	downloadPath, err := ensureOutputLocationExists(input)
+	if err != nil {
+		return "", err
+	}
+
+	if remember && downloadPath != config.LoadDownloadDir() {
+		if err := config.SaveDownloadDir(downloadPath); err != nil {
+			// Not fatal: the folder works for this run, it just won't be the
+			// default next time - the same as a client ID that won't save.
+			fmt.Printf("Couldn't remember that folder for next time: %v\n", err)
+		}
+	}
+
+	return downloadPath, nil
+}
+
+// defaultDownloadDir is what pressing enter at the folder prompt means: the
+// folder chosen last run, or ~/Downloads the first time.
+func defaultDownloadDir() (string, error) {
+	if saved := config.LoadDownloadDir(); saved != "" {
+		return saved, nil
+	}
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("finding your home directory: %w", err)
+	}
+
+	return filepath.Join(homeDir, "Downloads"), nil
+}
+
 func ensureOutputLocationExists(downloadPath string) (string, error) {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("finding your home directory: %w", err)
 	}
 
+	// A saved folder goes through everything below like a typed one - so one
+	// on a drive that isn't mounted gets the "create it?" prompt, not a
+	// confusing failure later.
 	if downloadPath == "" {
-		downloadPath = filepath.Join(homeDir, "Downloads")
+		downloadPath, err = defaultDownloadDir()
+		if err != nil {
+			return "", err
+		}
 	}
 
 	// The shell expands a leading tilde, but a path typed at our own prompt

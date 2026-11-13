@@ -177,6 +177,11 @@ func fakeHome(t *testing.T) string {
 }
 
 func TestEnsureOutputLocationExistsDefaultsToHomeDownloads(t *testing.T) {
+	// The default now reads the saved folder first, so the config has to be
+	// faked too - otherwise a folder saved by a real run would leak in and this
+	// test would fail on any machine where XDG_CONFIG_HOME is set. Config
+	// first, home second: both set HOME, and the later one wins.
+	fakeConfigDir(t)
 	home := fakeHome(t)
 	want := filepath.Join(home, "Downloads")
 	if err := os.Mkdir(want, 0755); err != nil {
@@ -189,6 +194,163 @@ func TestEnsureOutputLocationExistsDefaultsToHomeDownloads(t *testing.T) {
 	}
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestDefaultDownloadDirPrefersTheSavedOne(t *testing.T) {
+	fakeConfigDir(t)
+	fakeHome(t)
+
+	saved := t.TempDir()
+	if err := config.SaveDownloadDir(saved); err != nil {
+		t.Fatalf("setting up: %v", err)
+	}
+
+	got, err := defaultDownloadDir()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != saved {
+		t.Errorf("defaultDownloadDir() = %q, want the saved %q", got, saved)
+	}
+}
+
+func TestDefaultDownloadDirFallsBackToDownloads(t *testing.T) {
+	fakeConfigDir(t)
+	home := fakeHome(t)
+
+	got, err := defaultDownloadDir()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if want := filepath.Join(home, "Downloads"); got != want {
+		t.Errorf("defaultDownloadDir() = %q, want %q the first time", got, want)
+	}
+}
+
+func TestEnsureOutputLocationExistsUsesTheSavedDefault(t *testing.T) {
+	fakeConfigDir(t)
+	fakeHome(t)
+
+	saved := t.TempDir()
+	if err := config.SaveDownloadDir(saved); err != nil {
+		t.Fatalf("setting up: %v", err)
+	}
+
+	// Pressing enter at the prompt.
+	got, err := ensureOutputLocationExists("")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != saved {
+		t.Errorf("got %q, want the saved folder %q", got, saved)
+	}
+}
+
+func TestChooseDownloadDirRemembersIt(t *testing.T) {
+	fakeConfigDir(t)
+	fakeHome(t)
+
+	folder := t.TempDir()
+	got, err := chooseDownloadDir(folder, true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != folder {
+		t.Errorf("got %q, want %q", got, folder)
+	}
+
+	if saved := config.LoadDownloadDir(); saved != folder {
+		t.Errorf("saved %q, want %q remembered for next run", saved, folder)
+	}
+}
+
+// What's remembered is the resolved path, not what was typed - so the next
+// run's default is exact even if "~" meant something else by then.
+func TestChooseDownloadDirSavesTheResolvedPath(t *testing.T) {
+	fakeConfigDir(t)
+	home := fakeHome(t)
+
+	music := filepath.Join(home, "Music")
+	if err := os.Mkdir(music, 0755); err != nil {
+		t.Fatalf("setting up: %v", err)
+	}
+
+	if _, err := chooseDownloadDir("~/Music", true); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if saved := config.LoadDownloadDir(); saved != music {
+		t.Errorf("saved %q, want the resolved %q", saved, music)
+	}
+}
+
+// Saying no to creating a folder means it wasn't chosen, so last run's choice
+// stands.
+func TestChooseDownloadDirKeepsTheOldOneOnDecline(t *testing.T) {
+	fakeConfigDir(t)
+	fakeHome(t)
+
+	previous := t.TempDir()
+	if err := config.SaveDownloadDir(previous); err != nil {
+		t.Fatalf("setting up: %v", err)
+	}
+
+	feedStdin(t, "n\n")
+	_, err := chooseDownloadDir(filepath.Join(t.TempDir(), "does-not-exist"), true)
+	if !errors.Is(err, ErrDownloadDirDeclined) {
+		t.Fatalf("error = %v, want ErrDownloadDirDeclined", err)
+	}
+
+	if saved := config.LoadDownloadDir(); saved != previous {
+		t.Errorf("saved %q after a decline, want the previous %q kept", saved, previous)
+	}
+}
+
+// A dry run is for seeing what would happen, so a folder typed into one
+// shouldn't become the default.
+func TestChooseDownloadDirOnADryRunRemembersNothing(t *testing.T) {
+	fakeConfigDir(t)
+	fakeHome(t)
+
+	if _, err := chooseDownloadDir(t.TempDir(), false); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if saved := config.LoadDownloadDir(); saved != "" {
+		t.Errorf("a dry run saved %q, want nothing saved", saved)
+	}
+}
+
+func TestDownloadDirPromptShowsTheDefault(t *testing.T) {
+	fakeConfigDir(t)
+	fakeHome(t)
+
+	saved := t.TempDir()
+	if err := config.SaveDownloadDir(saved); err != nil {
+		t.Fatalf("setting up: %v", err)
+	}
+
+	// Otherwise pressing enter would put the downloads somewhere the prompt
+	// never mentioned.
+	if prompt := downloadDirPrompt(); !strings.Contains(prompt, saved) {
+		t.Errorf("prompt %q doesn't name the default folder %q", prompt, saved)
+	}
+}
+
+func TestEnsureOutputLocationExistsTypedBeatsSaved(t *testing.T) {
+	fakeConfigDir(t)
+	fakeHome(t)
+
+	if err := config.SaveDownloadDir(t.TempDir()); err != nil {
+		t.Fatalf("setting up: %v", err)
+	}
+
+	typed := t.TempDir()
+	got, err := ensureOutputLocationExists(typed)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != typed {
+		t.Errorf("got %q, want the typed folder %q", got, typed)
 	}
 }
 

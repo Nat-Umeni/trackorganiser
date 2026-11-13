@@ -12,11 +12,15 @@ import (
 const configFileName = "config.json"
 
 // config is what persists between runs. It is JSON rather than a bare string
-// because the token cache already is, and a default download directory is the
-// obvious next thing to want in here.
+// because the token cache already is. A field added later loads as its zero
+// value from an older file, so new settings need no migration.
 type config struct {
 	ClientID        string `json:"client_id"`
 	DeclinedVersion string `json:"declined_version"`
+
+	// DownloadDir is the folder chosen last run, offered as the default next
+	// time. Empty until one has been chosen.
+	DownloadDir string `json:"download_dir"`
 }
 
 // ConfigDir returns the directory holding the client ID and the refresh token,
@@ -75,6 +79,22 @@ func LoadDeclinedVersion() string {
 func SaveDeclinedVersion(declinedVersion string) error {
 	stored := loadConfig()
 	stored.DeclinedVersion = strings.TrimSpace(declinedVersion)
+
+	return saveConfig(stored)
+}
+
+// LoadDownloadDir returns the folder downloads went to last time, or an empty
+// string if none has been chosen yet.
+func LoadDownloadDir() string {
+	return loadConfig().DownloadDir
+}
+
+// SaveDownloadDir remembers the folder downloads went to, so the next run can
+// offer it as the default. Not trimmed, unlike the client ID: it arrives as an
+// absolute path already resolved, and a path may legitimately end in a space.
+func SaveDownloadDir(dir string) error {
+	stored := loadConfig()
+	stored.DownloadDir = dir
 
 	return saveConfig(stored)
 }

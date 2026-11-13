@@ -219,3 +219,53 @@ func TestConfigFileIsReadableJSON(t *testing.T) {
 		t.Error("the file is a single line, want it indented for a human to read")
 	}
 }
+
+func TestLoadDownloadDirWithNothingSaved(t *testing.T) {
+	fakeConfigHome(t)
+
+	// Nothing saved means "use the usual default", which the caller decides -
+	// not an error, and not a guess made here.
+	if got := LoadDownloadDir(); got != "" {
+		t.Errorf("LoadDownloadDir() = %q, want empty", got)
+	}
+}
+
+func TestSaveThenLoadDownloadDir(t *testing.T) {
+	fakeConfigHome(t)
+
+	if err := SaveDownloadDir("/mnt/g/Music"); err != nil {
+		t.Fatalf("saving: %v", err)
+	}
+
+	if got := LoadDownloadDir(); got != "/mnt/g/Music" {
+		t.Errorf("LoadDownloadDir() = %q, want the saved folder", got)
+	}
+}
+
+// Each setting is saved by reading the whole file, changing one field and
+// writing it back. This is the first time there's more than one setting being
+// saved on an ordinary run, so it's the first real proof that saving one
+// doesn't quietly wipe the other.
+func TestSavingOneSettingKeepsTheOthers(t *testing.T) {
+	fakeConfigHome(t)
+
+	if err := SaveClientID("the-client-id"); err != nil {
+		t.Fatalf("saving the client ID: %v", err)
+	}
+	if err := SaveDownloadDir("/mnt/g/Music"); err != nil {
+		t.Fatalf("saving the folder: %v", err)
+	}
+	if err := SaveDeclinedVersion("v9.9.9"); err != nil {
+		t.Fatalf("saving the declined version: %v", err)
+	}
+
+	if got := LoadClientID(); got != "the-client-id" {
+		t.Errorf("client ID = %q after saving other settings, want it kept", got)
+	}
+	if got := LoadDownloadDir(); got != "/mnt/g/Music" {
+		t.Errorf("download folder = %q after saving other settings, want it kept", got)
+	}
+	if got := LoadDeclinedVersion(); got != "v9.9.9" {
+		t.Errorf("declined version = %q, want it kept", got)
+	}
+}
