@@ -175,7 +175,8 @@ so occasionally it finds a different version, or nothing at all. It checks that
 what it found has the right song name, one of the right artists and Spotify's
 length, and when it doesn't, it looks further down the search results or tries a
 different search before giving up. Anything still suspicious is listed at the
-end of the run for you to check by ear.
+end of the run for you to check by ear. A song it can't find at all isn't saved -
+you won't get a different song in its place - and it tries again next run.
 
 **Nothing is ever deleted.** Removing a track from a playlist leaves the file
 alone, and deleting a file means it gets downloaded again next run.

@@ -317,7 +317,7 @@ func main() {
 
 	// Collected across every playlist and printed at the end. An inline warning
 	// is lost among hundreds of tracks; a short list afterwards is actionable.
-	var mismatches []string
+	var mismatches, notFound []string
 	skipped := 0
 	refreshed := 0
 
@@ -362,7 +362,9 @@ func main() {
 			toDownload = append(toDownload, track)
 		}
 
-		mismatches = append(mismatches, downloadTracks(dl, toDownload, jobs)...)
+		playlistMismatches, playlistNotFound := downloadTracks(dl, toDownload, jobs)
+		mismatches = append(mismatches, playlistMismatches...)
+		notFound = append(notFound, playlistNotFound...)
 	}
 
 	if skipped > 0 {
@@ -377,6 +379,13 @@ func main() {
 		fmt.Printf("\n%d track(s) may not be the right version, worth a listen:\n", len(mismatches))
 		for _, mismatch := range mismatches {
 			fmt.Printf("  %s\n", mismatch)
+		}
+	}
+
+	if len(notFound) > 0 {
+		fmt.Printf("\n%d track(s) not found on YouTube - nothing saved, it will try again next run:\n", len(notFound))
+		for _, missing := range notFound {
+			fmt.Printf("  %s\n", missing)
 		}
 	}
 
@@ -410,12 +419,52 @@ func openSelectionLog() (*os.File, string, error) {
 	return file, path, nil
 }
 
-// downloadTracks fetches up to jobs tracks at a time and returns a line for each
-// one whose length didn't match Spotify. Most of a download is spent waiting on
-// the network, which is why running several at once helps. The ceiling is
-// YouTube's tolerance for parallel requests from one IP, not the CPU.
-func downloadTracks(dl *downloader.AudioDownloader, tracks []spotify.Track, jobs int) []string {
-	var mismatches []string
+// bucket is where a download's outcome is reported at the end of the run.
+type bucket int
+
+const (
+	bucketOK bucket = iota
+
+	// A file was saved but may not be the right cut - worth a listen.
+	bucketListen
+
+	// Nothing was saved, so there is nothing to listen to. The next run tries
+	// again, since the folder is the record of what's downloaded.
+	bucketNotFound
+
+	// yt-dlp itself broke - printed as it happens.
+	bucketFailed
+)
+
+func (b bucket) String() string {
+	return [...]string{"ok", "worth a listen", "not found", "failed"}[b]
+}
+
+// reportBucket sorts a download's error into where it is reported. Length on
+// its own only ever lands in "worth a listen": an extended mix or a radio edit
+// is still usable, and duration was measured not to predict correctness.
+func reportBucket(err error) bucket {
+	switch {
+	case err == nil:
+		return bucketOK
+	case errors.Is(err, downloader.ErrSongMismatch),
+		errors.Is(err, downloader.ErrNoResults):
+		return bucketNotFound
+	case errors.Is(err, downloader.ErrArtistUnconfirmed),
+		errors.Is(err, downloader.ErrDurationMismatch),
+		errors.Is(err, downloader.ErrVersionMismatch):
+		return bucketListen
+	default:
+		return bucketFailed
+	}
+}
+
+// downloadTracks fetches up to jobs tracks at a time. It returns a line for
+// each track saved but worth a listen, and one for each it couldn't find at
+// all. Most of a download is spent waiting on the network, which is why
+// running several at once helps. The ceiling is YouTube's tolerance for
+// parallel requests from one IP, not the CPU.
+func downloadTracks(dl *downloader.AudioDownloader, tracks []spotify.Track, jobs int) (mismatches, notFound []string) {
 
 	// A buffered channel used as a counting semaphore: a car park with `jobs`
 	// spaces. Sending takes a ticket, receiving hands it back, and a send blocks
@@ -428,8 +477,8 @@ func downloadTracks(dl *downloader.AudioDownloader, tracks []spotify.Track, jobs
 	// for before returning.
 	var pendingDownloads sync.WaitGroup
 
-	// Named after what it guards: mismatches is appended to from several
-	// goroutines at once, which is a data race without this.
+	// Named after what it guards: mismatches and notFound are appended to from
+	// several goroutines at once, which is a data race without this.
 	var mismatchesLock sync.Mutex
 
 	// Counted on completion rather than on start. With several running at once
@@ -452,30 +501,33 @@ func downloadTracks(dl *downloader.AudioDownloader, tracks []spotify.Track, jobs
 
 			fmt.Printf("%d/%d - %s\n", completed.Add(1), len(tracks), track.FileName())
 
-			switch {
-			case errors.Is(err, downloader.ErrSongMismatch),
-				errors.Is(err, downloader.ErrDurationMismatch),
-				errors.Is(err, downloader.ErrVersionMismatch):
+			line := fmt.Sprintf("%s — %v", track.FileName(), err)
+
+			// Locked around the appends only. Holding it across the download
+			// above would serialise everything and undo the concurrency.
+			switch reportBucket(err) {
+			case bucketListen:
 				// Not a failure - the file downloaded and was tagged. Keep it and
 				// flag it, because an extended mix or a live version is often
 				// worth having.
-
-				// Locked around the append only. Holding it across the download
-				// above would serialise everything and undo the concurrency.
 				mismatchesLock.Lock()
-				mismatches = append(mismatches, fmt.Sprintf("%s — %v", track.FileName(), err))
+				mismatches = append(mismatches, line)
 				mismatchesLock.Unlock()
-			case err != nil:
-				fmt.Printf("Failed: %s — %v\n", track.FileName(), err)
+			case bucketNotFound:
+				mismatchesLock.Lock()
+				notFound = append(notFound, line)
+				mismatchesLock.Unlock()
+			case bucketFailed:
+				fmt.Printf("Failed: %s\n", line)
 			}
 		})
 	}
 
 	// Without this the function would return as soon as everything was launched,
-	// handing back an empty slice while downloads were still running.
+	// handing back empty slices while downloads were still running.
 	pendingDownloads.Wait()
 
-	return mismatches
+	return mismatches, notFound
 }
 
 func clampJobs(n int) int {

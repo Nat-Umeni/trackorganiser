@@ -246,6 +246,38 @@ func TestEnsureOutputLocationExistsExpandsTilde(t *testing.T) {
 	})
 }
 
+func TestReportBucket(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bucket
+	}{
+		{name: "downloaded fine", err: nil, want: bucketOK},
+
+		// A file was saved but may not be the right cut - worth a listen.
+		// Length on its own is never grounds for anything harsher.
+		{name: "wrong length", err: fmt.Errorf("%w: expected 3m, got 4m", downloader.ErrDurationMismatch), want: bucketListen},
+		{name: "wrong version", err: fmt.Errorf("%w: wanted x, got y", downloader.ErrVersionMismatch), want: bucketListen},
+		{name: "artist unconfirmed", err: fmt.Errorf("%w: kept it", downloader.ErrArtistUnconfirmed), want: bucketListen},
+
+		// Nothing was saved, so there is nothing to listen to - the run says it
+		// couldn't get them, and the next run tries again.
+		{name: "wrong song, not saved", err: fmt.Errorf("%w: nearest was x", downloader.ErrSongMismatch), want: bucketNotFound},
+		{name: "no results at all", err: fmt.Errorf("%w for %q", downloader.ErrNoResults, "query"), want: bucketNotFound},
+
+		// yt-dlp itself breaking is neither - it's printed as a failure.
+		{name: "yt-dlp failed", err: errors.New("yt-dlp failed: exit status 1"), want: bucketFailed},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := reportBucket(test.err); got != test.want {
+				t.Errorf("reportBucket(%v) = %v, want %v", test.err, got, test.want)
+			}
+		})
+	}
+}
+
 func TestClampJobs(t *testing.T) {
 	tests := []struct {
 		name string
@@ -346,7 +378,7 @@ func TestDownloadTracksReportsEveryMismatch(t *testing.T) {
 
 	// Deliberately more workers than the semaphore would need, to get real
 	// contention on the shared slice. Run under -race to make this meaningful.
-	mismatches := downloadTracks(dl, tracks, 8)
+	mismatches, _ := downloadTracks(dl, tracks, 8)
 
 	// The point of the test: a lost append under concurrency shows up here as a
 	// short list, and nowhere else.
@@ -372,10 +404,15 @@ func TestDownloadTracksWithOneWorker(t *testing.T) {
 		t.Skipf("downloader unavailable on this machine: %v", err)
 	}
 
-	// Nothing is pre-placed, so every track fails with "no YouTube results" and
-	// none of them count as a mismatch.
-	if mismatches := downloadTracks(dl, tracks, 1); len(mismatches) != 0 {
+	// Nothing is pre-placed, so every track finds no YouTube results. That is
+	// "not found", listed so the run says what it couldn't get - not a
+	// mismatch, since there is no file to listen to.
+	mismatches, notFound := downloadTracks(dl, tracks, 1)
+	if len(mismatches) != 0 {
 		t.Errorf("got %v, want no mismatches when nothing downloaded", mismatches)
+	}
+	if len(notFound) != len(tracks) {
+		t.Errorf("got %d not found, want all %d: %v", len(notFound), len(tracks), notFound)
 	}
 }
 
@@ -385,8 +422,8 @@ func TestDownloadTracksWithNoTracks(t *testing.T) {
 		t.Skipf("downloader unavailable on this machine: %v", err)
 	}
 
-	if mismatches := downloadTracks(dl, nil, 4); len(mismatches) != 0 {
-		t.Errorf("got %v, want nothing back for an empty track list", mismatches)
+	if mismatches, notFound := downloadTracks(dl, nil, 4); len(mismatches)+len(notFound) != 0 {
+		t.Errorf("got %v and %v, want nothing back for an empty track list", mismatches, notFound)
 	}
 }
 

@@ -45,6 +45,17 @@ func TestTitleMatches(t *testing.T) {
 
 		// Any script, not just Latin.
 		{name: "japanese", spotify: "夜に駆ける", youtube: "YOASOBI「夜に駆ける」 Official Music Video", want: true},
+
+		// From a real run: the right upload, rejected, because Spotify stored
+		// "é" as one character and YouTube as "e" plus a separate accent mark.
+		// They look identical and compare as different words.
+		{name: "accent encoded two ways", spotify: "recuérdame", youtube: "recuérdame", want: true},
+		{name: "accent dropped by the uploader", spotify: "Café del Mar", youtube: "Energy 52 - Cafe Del Mar", want: true},
+
+		// Mid-word is the case that needs the accent dropped rather than
+		// treated as a separator - at the end of a word the two look the same,
+		// and a mutation check showed the cases above couldn't tell them apart.
+		{name: "accent dropped mid-word", spotify: "recuérdame", youtube: "Yaego - Recuerdame", want: true},
 	}
 
 	for _, test := range tests {
@@ -52,6 +63,36 @@ func TestTitleMatches(t *testing.T) {
 			if got := titleMatches(test.spotify, test.youtube); got != test.want {
 				t.Errorf("titleMatches(%q, %q) = %v, want %v (core %q)",
 					test.spotify, test.youtube, got, test.want, songCore(test.spotify))
+			}
+		})
+	}
+}
+
+func TestLengthStandsIn(t *testing.T) {
+	tests := []struct {
+		name      string
+		spotifyMS int
+		actualMS  int
+		want      bool
+	}{
+		// Every real case was under a second out - the same master, re-uploaded.
+		{name: "grim saint, measured", spotifyMS: 124183, actualMS: 124000, want: true},
+		{name: "fallen, measured", spotifyMS: 435350, actualMS: 436000, want: true},
+		{name: "two seconds is the edge", spotifyMS: 100000, actualMS: 102000, want: true},
+
+		// Tighter than the 5s used for flagging: this lets an upload through
+		// with no artist credit, so it has to be the same recording.
+		{name: "two and a half seconds out", spotifyMS: 100000, actualMS: 102500, want: false},
+		{name: "a different edit", spotifyMS: 100000, actualMS: 140000, want: false},
+
+		// No length from Spotify means nothing to stand in with.
+		{name: "spotify gave no length", spotifyMS: 0, actualMS: 0, want: false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := lengthStandsIn(test.spotifyMS, test.actualMS); got != test.want {
+				t.Errorf("lengthStandsIn(%d, %d) = %v, want %v", test.spotifyMS, test.actualMS, got, test.want)
 			}
 		})
 	}
@@ -88,6 +129,16 @@ func TestArtistMatches(t *testing.T) {
 		// found in unrelated titles. The title check is what stops "Snow on The
 		// Bluff" - the two checks cover for each other.
 		{name: "artist name as an ordinary word", artists: []string{"Bluff"}, title: "Snow on The Bluff", channel: "evening elephants", want: true},
+
+		// From a real run: Spotify credited the artist as one name with the
+		// featured act inside it, and no upload repeats that whole string.
+		{name: "featuring dropped from the artist", artists: []string{"Stanton Warriors feat. Them & Us"},
+			title: "Cut Me Up (feat. Them & Us) (Cause & Affect Remix)", channel: "Stanton Warriors - Topic", want: true},
+		{name: "ft. dropped from the artist", artists: []string{"Someone ft. Other"}, title: "Song", channel: "Someone - Topic", want: true},
+		{name: "featuring spelled out", artists: []string{"Someone featuring Other"}, title: "Song", channel: "Someone - Topic", want: true},
+		{name: "featuring dropped, still checked", artists: []string{"Stanton Warriors feat. Them & Us"},
+			title: "Unrelated Song", channel: "Somebody Else", want: false},
+		{name: "accent in the artist", artists: []string{"Beyoncé"}, title: "Halo", channel: "Beyonce - Topic", want: true},
 
 		// Nothing to compare, so nothing to flag.
 		{name: "no artists", artists: nil, title: "Anything", channel: "Anyone", want: true},

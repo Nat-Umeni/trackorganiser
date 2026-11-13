@@ -52,8 +52,9 @@ func audioFixture(t *testing.T, seconds int) string {
 //
 //	ytsearch:<query>       download result 1: copy its audio to --output and
 //	                       write its info line where --print-to-file asks
-//	ytsearch5:<query>      list every result's info line on stdout, as
-//	                       --flat-playlist does, downloading nothing
+//	ytsearchN:<query>      list every result's info line on stdout, as
+//	                       --flat-playlist does, downloading nothing (N is
+//	                       deeperListSize - see listPrefix)
 //	https://...watch?v=ID  download that one result
 //
 // Anything else finds nothing: exit 0, no file - the real yt-dlp's behaviour for
@@ -100,9 +101,13 @@ done
 		fmt.Fprintf(&body, "\t'ytsearch:%s') cp '%s' \"$dest\"; printf '%s\\n' > \"$info\" ;;\n",
 			query, list[0].fixture, infoLine(query, 0, list[0]))
 
-		// List them all.
-		fmt.Fprintf(&body, "\t'ytsearch5:%s') printf '", query)
+		// List them - but no more than the listing asks for, as the real
+		// ytsearchN does, so a result past the depth is genuinely out of reach.
+		fmt.Fprintf(&body, "\t'%s%s') printf '", listPrefix(), query)
 		for index, result := range list {
+			if index >= deeperListSize {
+				break
+			}
 			fmt.Fprintf(&body, "%s\\n", infoLine(query, index, result))
 		}
 		body.WriteString("' ;;\n")
@@ -141,8 +146,22 @@ func readCalls(t *testing.T, calls string) []string {
 // assertKept checks the one file left in outputDir is fileName.mp3 at about
 // wantMS long - which fixture it is says which result was kept. Anything else
 // left behind would be counted as a track by the next run's scan.
+//
+// A wantMS of 0 means nothing should have been saved at all: a wrong song is
+// not kept, so the next run tries again rather than finding it "downloaded".
 func assertKept(t *testing.T, outputDir, fileName string, wantMS int) {
 	t.Helper()
+
+	if wantMS == 0 {
+		entries, err := os.ReadDir(outputDir)
+		if err != nil {
+			t.Fatalf("listing the output: %v", err)
+		}
+		for _, entry := range entries {
+			t.Errorf("%s was saved, but a wrong song must leave nothing behind", entry.Name())
+		}
+		return
+	}
 
 	gotMS, err := probeDurationMS(filepath.Join(outputDir, fileName+".mp3"))
 	if err != nil {
@@ -220,9 +239,9 @@ func TestDownloadBestAudioRetries(t *testing.T) {
 			wantCalls: 2,
 		},
 		{
-			// Nothing better turned up, so the first search's result stays -
-			// flagged, because it is probably still wrong. Both searches are
-			// also listed, finding nothing new, before giving up.
+			// Nothing right turned up anywhere - every search and both listings
+			// - so nothing is saved. A wrong song is never worth having, and
+			// leaving no file means the next run tries again.
 			name: "every search wrong",
 			results: map[string][]searchResult{
 				topicQuery:    {{"Snow on The Bluff", "evening elephants", wrong, 2}},
@@ -230,7 +249,7 @@ func TestDownloadBestAudioRetries(t *testing.T) {
 			},
 			fallbacks: []string{fallbackQuery},
 			wantErr:   ErrSongMismatch,
-			wantMS:    2000,
+			wantMS:    0,
 			wantCalls: 4,
 		},
 		{
@@ -304,10 +323,22 @@ func TestDownloadBestAudioLooksDeeper(t *testing.T) {
 	// from the original's, or keeping it by mistake would look identical.
 	tooLong := audioFixture(t, 20)
 
+	// Within the 5s that flags a download, but outside the stand-in's 2s.
+	nearly := audioFixture(t, 13)
+
 	const (
 		topicQuery    = "Easy Nokaut topic"
 		fallbackQuery = "Easy Nokaut"
 	)
+
+	// Eleven other songs by the same artist, then the right one at #12 - where
+	// "Everybody Dance" by CHIC turned up in a real listing. Out of reach of a
+	// 5-deep listing.
+	deepList := []searchResult{}
+	for index := 1; index <= 11; index++ {
+		deepList = append(deepList, searchResult{fmt.Sprintf("Other Song %d", index), "Nokaut - Topic", short, 2})
+	}
+	deepList = append(deepList, searchResult{"Easy", "Nokaut - Topic", long, 10})
 
 	tests := []struct {
 		name      string
@@ -326,7 +357,7 @@ func TestDownloadBestAudioLooksDeeper(t *testing.T) {
 			wantMS: 10000,
 			wantCalls: []string{
 				"ytsearch:" + topicQuery,
-				"ytsearch5:" + topicQuery,
+				listPrefix() + topicQuery,
 				"https://www.youtube.com/watch?v=" + resultID(topicQuery, 1),
 			},
 		},
@@ -356,23 +387,25 @@ func TestDownloadBestAudioLooksDeeper(t *testing.T) {
 			wantMS:    2000,
 			wantCalls: []string{
 				"ytsearch:" + topicQuery,
-				"ytsearch5:" + topicQuery,
-				"ytsearch5:" + fallbackQuery,
+				listPrefix() + topicQuery,
+				listPrefix() + fallbackQuery,
 			},
 		},
 		{
-			// Length only chooses between results that already pass the title
-			// and artist checks - it never lets an unrelated upload through.
-			name: "right length but nobody credited",
+			// An upload naming no credited artist is only accepted when its
+			// length is within the stand-in's 2s - near enough to be the same
+			// recording. Within the usual 5s is not enough: 3s out could be
+			// someone else's song of the same name.
+			name: "uncredited upload a few seconds out",
 			results: map[string][]searchResult{topicQuery: {
 				{"Easy", "Nokaut - Topic", short, 2},
-				{"Easy", "Some Other Band", long, 10},
+				{"Easy", "Some Other Band", long, 13},
 			}},
 			wantErr: ErrDurationMismatch,
 			wantMS:  2000,
 			wantCalls: []string{
 				"ytsearch:" + topicQuery,
-				"ytsearch5:" + topicQuery,
+				listPrefix() + topicQuery,
 			},
 		},
 		{
@@ -387,7 +420,7 @@ func TestDownloadBestAudioLooksDeeper(t *testing.T) {
 			wantMS:  2000,
 			wantCalls: []string{
 				"ytsearch:" + topicQuery,
-				"ytsearch5:" + topicQuery,
+				listPrefix() + topicQuery,
 				"https://www.youtube.com/watch?v=" + resultID(topicQuery, 1),
 			},
 		},
@@ -407,7 +440,107 @@ func TestDownloadBestAudioLooksDeeper(t *testing.T) {
 			wantCalls: []string{
 				"ytsearch:" + topicQuery,
 				"ytsearch:" + fallbackQuery,
-				"ytsearch5:" + topicQuery,
+				listPrefix() + topicQuery,
+				"https://www.youtube.com/watch?v=" + resultID(topicQuery, 1),
+			},
+		},
+		{
+			// From a real run: GRIM SAINT's tracks are uploaded by "DiEM
+			// ARCHiVE", which names no artist anywhere - the right song, at
+			// Spotify's length to the second, rejected by the artist check.
+			// A length that close stands in for the missing credit.
+			name:      "label upload at the right length",
+			results:   map[string][]searchResult{topicQuery: {{"Easy", "DiEM ARCHiVE", long, 10}}},
+			wantMS:    10000,
+			wantCalls: []string{"ytsearch:" + topicQuery},
+		},
+		{
+			// The same upload at the wrong length has nothing standing in for
+			// the artist, so the next search runs and its credited upload wins.
+			name: "label upload at the wrong length",
+			results: map[string][]searchResult{
+				topicQuery:    {{"Easy", "DiEM ARCHiVE", short, 2}},
+				fallbackQuery: {{"Nokaut - Easy", "Raveart Records", long, 10}},
+			},
+			fallbacks: []string{fallbackQuery},
+			wantMS:    10000,
+			wantCalls: []string{
+				"ytsearch:" + topicQuery,
+				"ytsearch:" + fallbackQuery,
+			},
+		},
+		{
+			// Chosen on the stand-in from a listing that claims 10s, but the
+			// file measures 13s - inside the usual 5s, outside the stand-in's
+			// 2s. With nobody credited, that's not close enough, so it is
+			// discarded, and with nothing else right, nothing is saved.
+			name: "stand-in that doesn't measure up",
+			results: map[string][]searchResult{topicQuery: {
+				{"Snow on The Bluff", "evening elephants", short, 2},
+				{"Easy (Original Mix)", "Release - Topic", nearly, 10},
+			}},
+			wantErr: ErrSongMismatch,
+			wantMS:  0,
+			wantCalls: []string{
+				"ytsearch:" + topicQuery,
+				listPrefix() + topicQuery,
+				"https://www.youtube.com/watch?v=" + resultID(topicQuery, 1),
+			},
+		},
+		{
+			// Length must not be what throws a right song away. The title is
+			// right but nobody credited appears, and the length is too far out
+			// to vouch for it - it could be an extended mix on a label's
+			// channel, or someone else's song of the same name. Uncertain, so
+			// it is kept and flagged for a listen, never discarded. Only a
+			// wrong title means certainly a different song.
+			name:      "right title, nobody credited, length off",
+			results:   map[string][]searchResult{topicQuery: {{"Easy", "DiEM ARCHiVE", short, 2}}},
+			wantErr:   ErrArtistUnconfirmed,
+			wantMS:    2000,
+			wantCalls: []string{"ytsearch:" + topicQuery, listPrefix() + topicQuery},
+		},
+		{
+			// When one search found the right title and another found nothing
+			// right at all, the right title is the one kept - even when it
+			// came second.
+			name: "the uncertain one is preferred over a wrong song",
+			results: map[string][]searchResult{
+				topicQuery:    {{"Snow on The Bluff", "evening elephants", tooLong, 20}},
+				fallbackQuery: {{"Easy", "DiEM ARCHiVE", short, 2}},
+			},
+			fallbacks: []string{fallbackQuery},
+			wantErr:   ErrArtistUnconfirmed,
+			wantMS:    2000,
+			wantCalls: []string{
+				"ytsearch:" + topicQuery,
+				"ytsearch:" + fallbackQuery,
+				listPrefix() + fallbackQuery,
+				listPrefix() + topicQuery,
+			},
+		},
+		{
+			name:    "the right one is result 12",
+			results: map[string][]searchResult{topicQuery: deepList},
+			wantMS:  10000,
+			wantCalls: []string{
+				"ytsearch:" + topicQuery,
+				listPrefix() + topicQuery,
+				"https://www.youtube.com/watch?v=" + resultID(topicQuery, 11),
+			},
+		},
+		{
+			// The stand-in works in a listing too: "Fallen (Original Mix)" from
+			// "Release - Topic", 435s against Spotify's 435s.
+			name: "label upload found deeper in the list",
+			results: map[string][]searchResult{topicQuery: {
+				{"Snow on The Bluff", "evening elephants", short, 2},
+				{"Easy (Original Mix)", "Release - Topic", long, 10},
+			}},
+			wantMS: 10000,
+			wantCalls: []string{
+				"ytsearch:" + topicQuery,
+				listPrefix() + topicQuery,
 				"https://www.youtube.com/watch?v=" + resultID(topicQuery, 1),
 			},
 		},
@@ -455,11 +588,18 @@ func TestDownloadBestAudioNamesBothTitlesOnASongMismatch(t *testing.T) {
 		t.Fatalf("error = %v, want ErrSongMismatch", err)
 	}
 
-	// This line lands in the end-of-run list, so it has to say what was asked
-	// for and what arrived - otherwise there is nothing to go and check by ear.
-	for _, want := range []string{"I Feel So Good", "Snow on The Bluff"} {
+	// This line lands in the end-of-run "not found" list, so it has to say what
+	// was asked for, the nearest thing found, and that nothing was kept -
+	// otherwise someone goes looking for a file that isn't there.
+	for _, want := range []string{"I Feel So Good", "Snow on The Bluff", "not saved"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q doesn't mention %q", err, want)
 		}
 	}
+}
+
+// listPrefix is the target prefix of a deeper-pick listing, taken from the
+// constant itself so the fake and the code can't disagree about the depth.
+func listPrefix() string {
+	return fmt.Sprintf("ytsearch%d:", deeperListSize)
 }

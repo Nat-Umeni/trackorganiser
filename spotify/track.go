@@ -88,12 +88,33 @@ func (t Track) JoinArtistNames() string {
 // Quotes inside the name are dropped, since they would end the quoted phrase
 // early. A name that is nothing but quotes gives an empty string, not "".
 func quoteArtist(name string) string {
-	cleaned := strings.TrimSpace(strings.ReplaceAll(name, `"`, ""))
+	cleaned := stripFeaturing(strings.ReplaceAll(name, `"`, ""))
 	if cleaned == "" {
 		return ""
 	}
 
 	return `"` + cleaned + `"`
+}
+
+// featuringWords start the featured part of an artist credit.
+var featuringWords = map[string]bool{"feat.": true, "feat": true, "ft.": true, "ft": true, "featuring": true}
+
+// stripFeaturing cuts an artist credit at its featured act: "Stanton Warriors
+// feat. Them & Us" becomes "Stanton Warriors". Quoted whole, that credit
+// demanded a phrase no upload has, and the search found nothing.
+//
+// Word by word rather than by searching the lowercased string, so a byte
+// offset found in the lowercase can never be applied to the original - the two
+// are not always the same length.
+func stripFeaturing(name string) string {
+	words := strings.Fields(name)
+	for index, word := range words {
+		if featuringWords[strings.ToLower(word)] {
+			return strings.Join(words[:index], " ")
+		}
+	}
+
+	return strings.Join(words, " ")
 }
 
 // withArtist joins a song name and a quoted artist, leaving out the artist
@@ -132,6 +153,12 @@ func (t Track) BuildSearchQuery() string {
 // OnDaMiKe's "MEETING LADIES" and "Needed U" as Conducta's "CASH"; the same
 // searches without "topic" found the right ones. The second artist gets a search
 // of its own, which is what found "What?" when Neumonic's name was the problem.
+//
+// Last comes the first artist **unquoted**. Unquoted is what YouTube
+// autocorrects, which is why every other search quotes - but it is also the
+// only search that found "Tekken 4: OST - Didgerhythm", credited on Spotify to
+// Namco Sounds. As a last resort it costs nothing on a track found earlier, and
+// the checks guard whatever it returns.
 func (t Track) BuildFallbackQueries() []string {
 	name := strings.TrimSpace(t.Name)
 
@@ -142,6 +169,10 @@ func (t Track) BuildFallbackQueries() []string {
 	queries := []string{withArtist(name, t.Artists[0].Name)}
 	if len(t.Artists) > 1 {
 		queries = append(queries, withArtist(name, t.Artists[1].Name))
+	}
+
+	if artist := stripFeaturing(strings.ReplaceAll(t.Artists[0].Name, `"`, "")); artist != "" {
+		queries = append(queries, name+" "+artist)
 	}
 
 	return queries

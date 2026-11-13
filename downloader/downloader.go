@@ -25,10 +25,22 @@ var ErrDurationMismatch = errors.New("downloaded audio length does not match Spo
 // but the file is still kept for the caller to judge.
 var ErrVersionMismatch = errors.New("downloaded a different version")
 
-// ErrSongMismatch means every search came back with a title that doesn't contain
-// the song's name - most likely a different song altogether, not just a
-// different cut. The best guess is kept so the caller can report it.
-var ErrSongMismatch = errors.New("downloaded what looks like a different song")
+// ErrSongMismatch means every search, retry and listing came back with a title
+// that doesn't contain the song's name - certainly a different song, not just a
+// different cut. Nothing is saved: a wrong song is never worth having, and with
+// no file there the next run tries again.
+var ErrSongMismatch = errors.New("no upload of this song found")
+
+// ErrArtistUnconfirmed means the title is right but nobody credited appears on
+// the upload, and its length is too far from Spotify's to vouch for it. That is
+// uncertain rather than wrong - a label's upload of an extended mix looks
+// exactly like this - so the file is kept and reported for a listen. Length is
+// never grounds for throwing a right title away.
+var ErrArtistUnconfirmed = errors.New("right title, but no credited artist and the length doesn't confirm it")
+
+// ErrNoResults means a search found nothing at all. yt-dlp exits 0 for that, so
+// this is how it is told apart from yt-dlp actually failing.
+var ErrNoResults = errors.New("no YouTube results")
 
 // videoInfoTemplate is what yt-dlp prints about the video it picked. Tab
 // separated, with the title last, so a title containing anything at all still
@@ -389,7 +401,7 @@ func (d *AudioDownloader) fetch(outBase, target string) (candidate, error) {
 	// downloaded nothing. Without this check addTagsToFile is the first thing to
 	// notice the missing file, so a normal not-found reads as a code defect.
 	if _, err := os.Stat(path); err != nil {
-		return candidate{}, fmt.Errorf("no YouTube results for %q", query)
+		return candidate{}, fmt.Errorf("%w for %q", ErrNoResults, query)
 	}
 
 	return candidate{path: path, query: query, info: readVideoInfo(infoPath)}, nil
@@ -410,9 +422,17 @@ func (d *AudioDownloader) DownloadBestAudio(req Request) (err error) {
 	selection := newSelectionRecord(req)
 	defer func() { selection.finish(err) }()
 
-	var picked, firstFound *candidate
-	pickedIndex, firstFoundIndex := -1, -1
+	var picked *candidate
+	pickedIndex := -1
 	var firstErr error
+
+	// The best of the results that didn't pass, kept in case nothing does. One
+	// with the right title beats one without - it may well be the song, by an
+	// uploader that credits nobody - and otherwise the first one found stays,
+	// since the "topic" search was measured to be the better one in general.
+	var fallback *candidate
+	fallbackIndex := -1
+	fallbackTitleOK := false
 
 	// Every video already downloaded, so the deeper pick doesn't fetch one of
 	// them a second time.
@@ -445,34 +465,48 @@ func (d *AudioDownloader) DownloadBestAudio(req Request) (err error) {
 
 		titleOK := titleMatches(req.Tags.Title, found.info.Title)
 		artistOK := artistMatches(req.Artists, found.info.Title, found.info.Channel)
-		matches := titleOK && artistOK
-		selection.attempt(index, query, found.info, nil, verdictFor(titleOK, artistOK)) // TEMP(selection-log)
+
+		// A label or archive upload names no artist, but the right song at
+		// Spotify's length to the second is the same master. Measured from the
+		// file, since it is already here.
+		standIn := false
+		if titleOK && !artistOK {
+			if actualMS, probeErr := probeDurationMS(found.path); probeErr == nil {
+				standIn = lengthStandsIn(req.DurationMS, actualMS)
+			}
+		}
+
+		matches := titleOK && (artistOK || standIn)
+		selection.attempt(index, query, found.info, nil, verdictFor(titleOK, artistOK, standIn)) // TEMP(selection-log)
 
 		if matches {
 			picked, pickedIndex = &found, index
 			break
 		}
 
-		// Wrong, but the first thing found stays the fallback - the "topic"
-		// search was measured to be the better one in general.
-		if firstFound == nil {
-			firstFound, firstFoundIndex = &found, index
+		if fallback == nil || (titleOK && !fallbackTitleOK) {
+			if fallback != nil {
+				os.Remove(fallback.path)
+			}
+			fallback, fallbackIndex, fallbackTitleOK = &found, index, titleOK
 		} else {
 			os.Remove(found.path)
 		}
 	}
 
-	songMismatch := false
+	// nothingPassed means the kept file is the fallback: no result passed the
+	// song and artist checks.
+	nothingPassed := false
 	switch {
-	case picked == nil && firstFound == nil:
+	case picked == nil && fallback == nil:
 		// Nothing downloaded at all. The first search's error is the one to
 		// report - it is the search the program normally runs.
 		return firstErr
 	case picked == nil:
-		picked, pickedIndex = firstFound, firstFoundIndex
-		songMismatch = true
-	case firstFound != nil:
-		os.Remove(firstFound.path)
+		picked, pickedIndex = fallback, fallbackIndex
+		nothingPassed = true
+	case fallback != nil:
+		os.Remove(fallback.path)
 	}
 
 	selection.keep(pickedIndex, picked.info) // TEMP(selection-log)
@@ -480,13 +514,22 @@ func (d *AudioDownloader) DownloadBestAudio(req Request) (err error) {
 	// What was picked would be flagged - a different song, a different
 	// version, or the wrong length. The right one is often a little further
 	// down the same search, so look there before settling.
-	if songMismatch || d.wouldBeFlagged(req, *picked) {
+	if nothingPassed || d.wouldBeFlagged(req, *picked) {
 		if better := d.deeperPick(req, base, searchOrder(picked.query, queries), tried, selection); better != nil {
 			os.Remove(picked.path)
 			picked = better
-			songMismatch = false
+			nothingPassed = false
 			selection.keepDeeper(picked.info) // TEMP(selection-log)
 		}
+	}
+
+	// Not even the title was right, anywhere: certainly a different song, and
+	// never worth a place in the folder. Leaving nothing there also means the
+	// next run tries again, in case it turns up on YouTube later.
+	if nothingPassed && !fallbackTitleOK {
+		os.Remove(picked.path)
+		selection.discard() // TEMP(selection-log)
+		return fmt.Errorf("%w: wanted %q, nearest was %q - not saved", ErrSongMismatch, req.Tags.Title, picked.info.Title)
 	}
 
 	if picked.path != downloadedPath {
@@ -511,11 +554,11 @@ func (d *AudioDownloader) DownloadBestAudio(req Request) (err error) {
 		os.Chtimes(downloadedPath, req.AddedAt, req.AddedAt)
 	}
 
-	// The strongest signal first: a different song is wrong outright, a
-	// different remix nearly always is, whereas a length difference is often
-	// just a radio edit that is perfectly usable.
-	if songMismatch {
-		return fmt.Errorf("%w: wanted %q, got %q", ErrSongMismatch, req.Tags.Title, picked.info.Title)
+	// The strongest signal first: an uploader nobody can vouch for, then a
+	// different remix, which is nearly always wrong, whereas a length
+	// difference is often just a radio edit that is perfectly usable.
+	if nothingPassed {
+		return fmt.Errorf("%w: wanted %q, kept %q from %q", ErrArtistUnconfirmed, req.Tags.Title, picked.info.Title, picked.info.Channel)
 	}
 
 	if youtubeTitle := picked.info.Title; youtubeTitle != "" {
@@ -544,9 +587,11 @@ func (d *AudioDownloader) DownloadBestAudio(req Request) (err error) {
 	return nil
 }
 
-// deeperListSize is how far down each search the deeper pick looks. Both real
-// cases that prompted it had the right edit at result 2.
-const deeperListSize = 5
+// deeperListSize is how far down each search the deeper pick looks. The first
+// real cases had the right edit at result 2, but a run over 509 tracks found
+// them at #7, #8, #10 and #12 as well. Twenty still fits in YouTube's first
+// results page, so a listing costs the same one request as five did.
+const deeperListSize = 20
 
 // watchURL turns a video ID from a listing into something yt-dlp downloads as
 // exactly that video, rather than searching again.
@@ -584,22 +629,32 @@ func searchOrder(first string, queries []string) []string {
 }
 
 // isWanted reports whether a listed result would pass every check without being
-// downloaded first: the song and artist, the named version, and - when Spotify
-// gives one - the length. A result with no listed length can't be confirmed,
-// so it is passed over rather than gambled on.
-func isWanted(req Request, info videoInfo) bool {
-	if !titleMatches(req.Tags.Title, info.Title) ||
-		!artistMatches(req.Artists, info.Title, info.Channel) ||
-		!versionMatches(req.Tags.Title, info.Title) {
-		return false
+// downloaded first: the song, the named version, the artist - or a listed
+// length close enough to stand in for one - and, when Spotify gives one, the
+// length. A result with no listed length can't be confirmed, so it is passed
+// over rather than gambled on.
+//
+// viaStandIn says the length is what vouched for the artist, so the download
+// has to measure up to the stand-in's tighter tolerance, not just the usual one.
+func isWanted(req Request, info videoInfo) (wanted, viaStandIn bool) {
+	if !titleMatches(req.Tags.Title, info.Title) || !versionMatches(req.Tags.Title, info.Title) {
+		return false, false
+	}
+
+	listedMS, listed := info.durationMS()
+
+	if !artistMatches(req.Artists, info.Title, info.Channel) {
+		if !listed || !lengthStandsIn(req.DurationMS, listedMS) {
+			return false, false
+		}
+		viaStandIn = true
 	}
 
 	if req.DurationMS <= 0 {
-		return true
+		return true, viaStandIn
 	}
 
-	listedMS, ok := info.durationMS()
-	return ok && durationsMatch(req.DurationMS, listedMS)
+	return listed && durationsMatch(req.DurationMS, listedMS), viaStandIn
 }
 
 // deeperPick lists the top results of each search, without downloading them,
@@ -621,7 +676,12 @@ func (d *AudioDownloader) deeperPick(req Request, base string, queries []string,
 		}
 
 		for position, info := range results {
-			if tried[info.ID] || !isWanted(req, info) {
+			if tried[info.ID] {
+				continue
+			}
+
+			wanted, viaStandIn := isWanted(req, info)
+			if !wanted {
 				continue
 			}
 
@@ -638,8 +698,15 @@ func (d *AudioDownloader) deeperPick(req Request, base string, queries []string,
 				return nil
 			}
 
-			// The listing's length is a claim; the file is the fact.
-			if actualMS, err := probeDurationMS(found.path); err == nil && !durationsMatch(req.DurationMS, actualMS) {
+			// The listing's length is a claim; the file is the fact. When the
+			// length is all that vouched for the artist, it has to be as close
+			// as the stand-in demands, not just within the usual tolerance.
+			lengthOK := durationsMatch
+			if viaStandIn {
+				lengthOK = lengthStandsIn
+			}
+
+			if actualMS, err := probeDurationMS(found.path); err == nil && !lengthOK(req.DurationMS, actualMS) {
 				selection.note("deeper: measured %s, not the listed %ss - discarded", // TEMP(selection-log)
 					time.Duration(actualMS)*time.Millisecond, info.Duration)
 				os.Remove(found.path)

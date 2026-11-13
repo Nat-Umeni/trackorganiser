@@ -187,6 +187,18 @@ func TestTrackBuildSearchQuery(t *testing.T) {
 			track: Track{Name: "Song", Artists: []Artist{{Name: ` "" `}}},
 			want:  "Song topic",
 		},
+		{
+			// From a real run: quoting the whole credit demanded that exact
+			// phrase, which no upload has, and the search found nothing.
+			name:  "featuring is dropped from the artist",
+			track: Track{Name: "Cut Me Up", Artists: []Artist{{Name: "Stanton Warriors feat. Them & Us"}}},
+			want:  `Cut Me Up "Stanton Warriors" topic`,
+		},
+		{
+			name:  "ft. and case",
+			track: Track{Name: "Song", Artists: []Artist{{Name: "Someone FT. Other"}}},
+			want:  `Song "Someone" topic`,
+		},
 	}
 
 	for _, test := range tests {
@@ -209,7 +221,7 @@ func TestTrackBuildFallbackQueries(t *testing.T) {
 			// one, minus "topic", put the right upload first.
 			name:  "one artist",
 			track: Track{Name: "I Feel So Good", Artists: []Artist{{Name: "Bluff"}}},
-			want:  []string{`I Feel So Good "Bluff"`},
+			want:  []string{`I Feel So Good "Bluff"`, `I Feel So Good Bluff`},
 		},
 		{
 			// From a real run: "Neumonic" was autocorrected to "Mnemonic", and
@@ -219,7 +231,21 @@ func TestTrackBuildFallbackQueries(t *testing.T) {
 				Name:    "What?",
 				Artists: []Artist{{Name: "Neumonic"}, {Name: "Mary Droppinz"}, {Name: "Third"}},
 			},
-			want: []string{`What? "Neumonic"`, `What? "Mary Droppinz"`},
+			want: []string{`What? "Neumonic"`, `What? "Mary Droppinz"`, `What? Neumonic`},
+		},
+		{
+			// From a real run: only the unquoted search found "Tekken 4: OST -
+			// Didgerhythm", credited on Spotify to Namco Sounds. Unquoted is what
+			// YouTube autocorrects, so it goes last - a last resort, with the
+			// checks guarding whatever it returns.
+			name:  "unquoted search goes last",
+			track: Track{Name: "Didgerhythm", Artists: []Artist{{Name: "Namco Sounds"}}},
+			want:  []string{`Didgerhythm "Namco Sounds"`, `Didgerhythm Namco Sounds`},
+		},
+		{
+			name:  "featuring is dropped in every fallback",
+			track: Track{Name: "Cut Me Up", Artists: []Artist{{Name: "Stanton Warriors feat. Them & Us"}}},
+			want:  []string{`Cut Me Up "Stanton Warriors"`, `Cut Me Up Stanton Warriors`},
 		},
 		{
 			name:  "no artists",
@@ -229,7 +255,7 @@ func TestTrackBuildFallbackQueries(t *testing.T) {
 		{
 			name:  "whitespace is trimmed",
 			track: Track{Name: " ETA ", Artists: []Artist{{Name: " NewJeans "}}},
-			want:  []string{`ETA "NewJeans"`},
+			want:  []string{`ETA "NewJeans"`, `ETA NewJeans`},
 		},
 	}
 

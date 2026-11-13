@@ -3,6 +3,8 @@ package downloader
 import (
 	"strings"
 	"unicode"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 // featuringMarkers end the song's own name in a normalized Spotify title. They
@@ -17,11 +19,19 @@ var featuringMarkers = []string{" feat ", " ft ", " featuring "}
 // "Dont" both appear and should match. Everything else that isn't a letter or a
 // digit separates words. Letters are any script's, so a Japanese title matches
 // itself.
+//
+// Accents are dropped too. The same "é" can be stored as one character or as
+// "e" plus a separate accent mark, and Spotify and YouTube don't agree - a real
+// "recuérdame" was rejected for it. NFD splits every accented letter into the
+// letter and its mark, and the mark is then skipped, which also lets "Café"
+// match an upload titled "Cafe".
 func normalizeTitle(title string) string {
 	var builder strings.Builder
 
-	for _, r := range strings.ToLower(title) {
+	for _, r := range norm.NFD.String(strings.ToLower(title)) {
 		switch {
+		case unicode.Is(unicode.Mn, r):
+			// An accent mark, split off its letter by NFD.
 		case r == '\'' || r == '’' || r == '`':
 			// Dropped, joining "don't" into "dont".
 		case r == '&':
@@ -69,7 +79,13 @@ func songCore(spotifyName string) string {
 	// "Jay-Z" is left alone.
 	name, _, _ := strings.Cut(spotifyName, " - ")
 
-	padded := " " + normalizeTitle(stripBracketed(name)) + " "
+	return cutFeaturing(normalizeTitle(stripBracketed(name)))
+}
+
+// cutFeaturing ends an already normalized name at its featuring credit, if it
+// has one - "bounce ft someone" becomes "bounce".
+func cutFeaturing(normalized string) string {
+	padded := " " + normalized + " "
 	for _, marker := range featuringMarkers {
 		if before, _, found := strings.Cut(padded, marker); found {
 			padded = before + " "
@@ -96,6 +112,33 @@ func titleMatches(spotifyName, youtubeTitle string) bool {
 	return strings.Contains(" "+normalizeTitle(youtubeTitle)+" ", " "+core+" ")
 }
 
+// standInToleranceMS is how close a result's length must be to Spotify's for
+// the length to stand in for a missing artist credit. Far tighter than the 5s
+// used to flag a download: it lets an upload through with nobody credited, so
+// it has to be the same recording. Every real case was under a second out.
+const standInToleranceMS = 2000
+
+// lengthStandsIn reports whether a result is close enough to Spotify's length
+// to be accepted without its artist appearing anywhere.
+//
+// Labels and archives upload under their own name - GRIM SAINT's tracks under
+// "DiEM ARCHiVE", others under the auto-generated "Release - Topic" - so the
+// artist check rejects the right song. Same title plus the same length to the
+// second is the same master. The artist check exists for "123", where an
+// unrelated song shared a short title; it was a minute longer.
+func lengthStandsIn(spotifyMS, actualMS int) bool {
+	if spotifyMS <= 0 {
+		return false
+	}
+
+	difference := spotifyMS - actualMS
+	if difference < 0 {
+		difference = -difference
+	}
+
+	return difference <= standInToleranceMS
+}
+
 // artistMatches reports whether any of the track's artists appears in the
 // video's title or channel - "Dominic B - Topic" carries it in the channel,
 // "Nokaut – Easy [RAR492]" in the title.
@@ -120,7 +163,9 @@ func artistMatches(artists []string, youtubeTitle, channel string) bool {
 
 	checked := false
 	for _, artist := range artists {
-		name := normalizeTitle(stripBracketed(artist))
+		// The featured act is dropped from a credit like "Stanton Warriors feat.
+		// Them & Us", because no upload repeats that whole string.
+		name := cutFeaturing(normalizeTitle(stripBracketed(artist)))
 		if name == "" {
 			continue
 		}

@@ -44,6 +44,16 @@ func (r *selectionRecord) note(format string, args ...any) {
 	fmt.Fprintf(&r.builder, "  "+format+"\n", args...)
 }
 
+// discard records that what was picked was thrown away, not kept.
+func (r *selectionRecord) discard() {
+	if r == nil {
+		return
+	}
+
+	r.kept = -1
+	r.deeper = false
+}
+
 // keepDeeper records that a result from a listing replaced the first pick.
 func (r *selectionRecord) keepDeeper(info videoInfo) {
 	if r == nil {
@@ -68,12 +78,14 @@ func newSelectionRecord(req Request) *selectionRecord {
 
 // verdictFor names which check failed, so the log shows whether the title or
 // the artist was the giveaway.
-func verdictFor(titleOK, artistOK bool) string {
+func verdictFor(titleOK, artistOK, standIn bool) string {
 	switch {
 	case !titleOK && !artistOK:
 		return "title WRONG, artist WRONG"
 	case !titleOK:
 		return "title WRONG"
+	case !artistOK && standIn:
+		return "ok (length stands in for the artist)"
 	case !artistOK:
 		return "artist WRONG"
 	default:

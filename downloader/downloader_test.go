@@ -1,6 +1,7 @@
 package downloader
 
 import (
+	"errors"
 	"net/http"
 	"os"
 	"os/exec"
@@ -235,6 +236,12 @@ func TestDownloadBestAudioReportsNoResults(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "Boiled Egg") {
 		t.Errorf("error %q does not say which search failed", err)
+	}
+
+	// Matched by identity, not by wording, so the end of the run can list it
+	// under "not found" rather than as a failure.
+	if !errors.Is(err, ErrNoResults) {
+		t.Errorf("error %q is not ErrNoResults", err)
 	}
 }
 
